@@ -428,6 +428,8 @@ private fun TopBar(
                     trailingIcon = { androidx.compose.material3.Checkbox(!app.settings.stylusOnly, null) })
                 DropdownMenuItem({ Text("두 손가락 탭으로 실행 취소") }, { app.updateSettings { it.copy(tapGesturesUndo = !it.tapGesturesUndo) } },
                     trailingIcon = { androidx.compose.material3.Checkbox(app.settings.tapGesturesUndo, null) })
+                DropdownMenuItem({ Text("낙서로 지우기") }, { app.updateSettings { it.copy(scribbleToErase = !it.scribbleToErase) } },
+                    trailingIcon = { androidx.compose.material3.Checkbox(app.settings.scribbleToErase, null) })
             }
             DropdownMenu(coverMenu, { coverMenu = false }) {
                 DropdownMenuItem({ Text("표지 없음") }, { coverMenu = false; model.setCover(null) })

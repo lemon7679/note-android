@@ -257,6 +257,35 @@ class SmokeTest {
         }
         assertTrue(pkg.thumbnailFile.exists())
 
+        // 낙서로 지우기: write a word, then scribble over it with the pen → the word is erased
+        // and the scribble itself isn't added.
+        fun savedStrokes(): Int {
+            val d = pkg.readDocument()
+            var n = 0
+            onMain { val page = InkPage(595f, 842f); page.load(pkg.readInk(d.pages[0].id)!!); n = page.strokeCount; page.dispose() }
+            return n
+        }
+        val before = savedStrokes()
+        onMain { app.openNotebook(LibraryRef(LibrarySource.LOCAL, "/선형대수 필기.inknote")) }
+        SystemClock.sleep(1500)
+        val scratchCanvas = findCanvas(scenario)!!
+        val sw = scratchCanvas.width.toFloat()
+        val sh = scratchCanvas.height.toFloat()
+        val sx = sw * 0.22f
+        val sy = sh * 0.22f + 420 * minOf(sw, sh) / 900f
+        val sk = minOf(sw, sh) / 900f
+        stylusStroke(scratchCanvas, (0..50).map { i -> val t = i / 50f; sx + t * 120 * sk to sy + 12 * sk * sin(t * 3 * PI.toFloat()) })
+        stylusStroke(scratchCanvas, (0 until 7).flatMap { pass ->
+            (0..24).map { i ->
+                val t = if (pass % 2 == 0) i / 24f else 1 - i / 24f
+                sx - 10 * sk + t * 140 * sk to sy - 15 * sk + pass * 5 * sk
+            }
+        })
+        shot("02b-scratch-out")
+        device.pressBack()
+        SystemClock.sleep(1500)
+        assertEquals("scribbled-over word erased, scribble not kept", before, savedStrokes())
+
         // PDF notebook with the highlighter.
         onMain {
             app.saveTools(ToolState(tool = EditorTool.HIGHLIGHTER, lastInkTool = EditorTool.HIGHLIGHTER))

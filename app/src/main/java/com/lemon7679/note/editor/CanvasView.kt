@@ -27,6 +27,7 @@ import com.lemon7679.note.ink.InkAffine
 import com.lemon7679.note.ink.InkPage
 import com.lemon7679.note.ink.InkRGBA
 import com.lemon7679.note.ink.PenSample
+import com.lemon7679.note.ink.SnappedShape
 import com.lemon7679.note.ink.StrokeBuilder
 import com.lemon7679.note.render.ElementDrawing
 import com.lemon7679.note.render.PageImageRenderer
@@ -107,6 +108,8 @@ class CanvasView(context: Context, private val model: EditorModel, private val h
     private var erased = false
     private var eraserPoint: Pair<Float, Float>? = null
     private val lasso = ArrayList<Pair<Float, Float>>()
+    /** Raw page-space points of the pen stroke being drawn (낙서로 지우기). */
+    private val strokePoints = ArrayList<Pair<Float, Float>>()
     private var selection: InkSelection? = null
     private var dragStart = 0f to 0f
     private var dragDelta = 0f to 0f
@@ -734,6 +737,7 @@ class CanvasView(context: Context, private val model: EditorModel, private val h
         for (h in 0 until e.historySize) samples += sample(e, i, frame, h)
         samples += sample(e, i, frame)
         builder.add(samples)
+        for (p in samples) strokePoints += p.x to p.y
     }
 
     @SuppressLint("ClickableViewAccessibility")
@@ -846,7 +850,10 @@ class CanvasView(context: Context, private val model: EditorModel, private val h
                 builder.setShapeConstraint(fingers.isNotEmpty())
                 s.clearOverlay()
                 s.overlayMultiply = tool == EditorTool.HIGHLIGHTER
-                builder.begin(sample(e, i, frame))
+                val first = sample(e, i, frame)
+                strokePoints.clear()
+                strokePoints += first.x to first.y
+                builder.begin(first)
                 scheduleFrame()
             }
             EditorTool.ERASER -> {
@@ -1024,11 +1031,14 @@ class CanvasView(context: Context, private val model: EditorModel, private val h
                 } else {
                     feed(e, i, s)
                     builder.end()
-                    val strokeId = s.ink.commit(builder)
-                    refreshNow(s, s.ink.takeDirty())   // new stroke into the tiles first…
-                    s.clearOverlay()                    // …then drop the overlay: no flicker
-                    if (strokeId != 0L) model.noteInkEdit(s.page.id)
+                    if (!scratchOut(s)) {
+                        val strokeId = s.ink.commit(builder)
+                        refreshNow(s, s.ink.takeDirty())   // new stroke into the tiles first…
+                        s.clearOverlay()                    // …then drop the overlay: no flicker
+                        if (strokeId != 0L) model.noteInkEdit(s.page.id)
+                    }
                 }
+                strokePoints.clear()
             }
             Mode.ERASING -> if (s != null) {
                 s.ink.eraseEnd()
@@ -1101,6 +1111,30 @@ class CanvasView(context: Context, private val model: EditorModel, private val h
             scroller.fling(offX.toInt(), offY.toInt(), vx.toInt(), vy.toInt(), minX, maxX, min(0, height - ch), 0)
             scheduleFrame()
         }
+    }
+
+    // ------------------------------------------------------------------ scratch-out
+
+    /**
+     * 낙서로 지우기: a pen stroke scribbled back and forth over ink erases the strokes
+     * it covers (one undo step) instead of being added. Returns false — keep the stroke
+     * as ink — when it isn't a scribble or nothing lies under it.
+     */
+    private fun scratchOut(s: PageState): Boolean {
+        if (!settings.scribbleToErase || tools.tool != EditorTool.PEN) return false
+        if (builder.snappedShape != SnappedShape.NONE) return false
+        val scribble = ScribbleDetector.detect(strokePoints) ?: return false
+        val ids = s.ink.selectLasso(scribble.hull)
+        if (ids.isEmpty()) return false
+        val covered = s.ink.bounds(ids)
+        if (!s.ink.delete(ids)) return false
+        builder.cancel()
+        val dirty = s.ink.takeDirty()?.apply { covered?.let { union(it) } } ?: covered
+        refreshNow(s, dirty?.apply { inset(-4f, -4f) })
+        s.clearOverlay()
+        model.noteInkEdit(s.page.id)
+        performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+        return true
     }
 
     // ------------------------------------------------------------------ lasso

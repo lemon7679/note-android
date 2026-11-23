@@ -574,6 +574,10 @@ fun SettingsScreen(app: AppModel, onEditAccount: (NasAccount) -> Unit, onDismiss
                 Box(Modifier.padding(horizontal = 16.dp)) {
                     OptionToggle("두 손가락 탭: 실행 취소 · 세 손가락 탭: 다시 실행", s.tapGesturesUndo) { v -> app.updateSettings { it.copy(tapGesturesUndo = v) } }
                 }
+                CardDivider()
+                Box(Modifier.padding(horizontal = 16.dp)) {
+                    OptionToggle("낙서로 지우기", s.scribbleToErase, "펜으로 글씨 위를 여러 번 왔다 갔다 문지르면 그 아래 필기가 지워집니다.") { v -> app.updateSettings { it.copy(scribbleToErase = v) } }
+                }
             }
             Spacer(Modifier.height(12.dp))
             SectionLabel("새 노트 기본값")

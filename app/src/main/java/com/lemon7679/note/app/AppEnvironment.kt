@@ -86,6 +86,8 @@ data class AppSettings(
     val stylusOnly: Boolean = true,
     /** Two-finger tap = undo, three-finger tap = redo. */
     val tapGesturesUndo: Boolean = true,
+    /** 낙서로 지우기: scribbling back and forth over ink with the pen erases it. */
+    val scribbleToErase: Boolean = true,
     val defaultTemplate: PaperTemplate = PaperTemplate.RULED,
     val defaultPaperColor: PaperColor = PaperColor.WHITE,
     val defaultSize: PageSizePreset = PageSizePreset.A4,
