@@ -8,6 +8,9 @@ cd "$(dirname "$0")/.."
 TAG="${1:-device}"
 adb logcat -G 16M > /dev/null 2>&1 || true
 adb logcat -c || true
+# Let the freshly booted emulator settle (avoids launcher ANR dialogs over the app).
+sleep 20
+adb shell am broadcast -a android.intent.action.CLOSE_SYSTEM_DIALOGS > /dev/null 2>&1 || true
 ./gradlew --no-daemon -q :app:installDebug :app:installDebugAndroidTest
 adb shell settings put global window_animation_scale 0
 adb shell settings put global transition_animation_scale 0
@@ -31,6 +34,7 @@ echo "== release build"
 ./gradlew --no-daemon -q :app:assembleRelease -PnoteVersion=0.0.0-ci
 adb install -r app/build/outputs/apk/release/app-release.apk
 adb shell am force-stop com.lemon7679.note
+adb shell am broadcast -a android.intent.action.CLOSE_SYSTEM_DIALOGS > /dev/null 2>&1 || true
 adb shell am start -W -n com.lemon7679.note/.MainActivity
 sleep 6
 adb shell uiautomator dump /sdcard/ui.xml > /dev/null && adb pull /sdcard/ui.xml ui.xml > /dev/null

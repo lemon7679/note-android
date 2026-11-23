@@ -64,8 +64,23 @@ class SmokeTest {
     private val app get() = (context.applicationContext as NoteApplication).model
     private val shots = File(context.getExternalFilesDir(null), "shots").apply { mkdirs() }
 
+    /** Slow emulators sometimes show "<app> isn't responding" for the launcher; it would swallow our input. */
+    private fun dismissSystemDialogs() {
+        repeat(3) {
+            val wait = device.findObject(By.res("android:id/aerr_wait")) ?: device.findObject(By.text("Wait")) ?: return
+            wait.click()
+            SystemClock.sleep(500)
+        }
+    }
+
+    @org.junit.Before fun setUp() {
+        device.waitForIdle()
+        dismissSystemDialogs()
+    }
+
     private fun shot(name: String) {
         SystemClock.sleep(1200)
+        dismissSystemDialogs()
         instrumentation.waitForIdleSync()
         val bmp = instrumentation.uiAutomation.takeScreenshot() ?: return
         File(shots, "$name.png").outputStream().use { bmp.compress(Bitmap.CompressFormat.PNG, 100, it) }
@@ -132,6 +147,7 @@ class SmokeTest {
 
     /** Draws with an injected stylus (real input pipeline: MotionEvent → CanvasView → engine). */
     private fun stylusStroke(view: View, points: List<Pair<Float, Float>>, holdMs: Long = 0) {
+        dismissSystemDialogs()
         val loc = IntArray(2)
         view.getLocationOnScreen(loc)
         val down = SystemClock.uptimeMillis()
@@ -143,24 +159,23 @@ class SmokeTest {
             })
             return MotionEvent.obtain(down, t, action, 1, props, coords, 0, 0, 1f, 1f, 0, 0, InputDevice.SOURCE_STYLUS, 0)
         }
-        var t = down
-        instrumentation.uiAutomation.injectInputEvent(event(MotionEvent.ACTION_DOWN, t, points[0].first, points[0].second, 0.3f), true)
+        // Real-time paced, monotonic timestamps (like a real stylus at ~120 Hz).
+        instrumentation.uiAutomation.injectInputEvent(event(MotionEvent.ACTION_DOWN, down, points[0].first, points[0].second, 0.3f), true)
         points.drop(1).forEachIndexed { i, (x, y) ->
-            t += 8
+            SystemClock.sleep(8)
             val p = 0.35f + 0.4f * sin(i / points.size.toFloat() * PI.toFloat())
-            instrumentation.uiAutomation.injectInputEvent(event(MotionEvent.ACTION_MOVE, t, x, y, p), true)
+            instrumentation.uiAutomation.injectInputEvent(event(MotionEvent.ACTION_MOVE, SystemClock.uptimeMillis(), x, y, p), true)
         }
+        val (x, y) = points.last()
         if (holdMs > 0) {
-            val (x, y) = points.last()
             val end = SystemClock.uptimeMillis() + holdMs
             while (SystemClock.uptimeMillis() < end) {
                 SystemClock.sleep(40)
                 instrumentation.uiAutomation.injectInputEvent(event(MotionEvent.ACTION_MOVE, SystemClock.uptimeMillis(), x, y, 0.5f), true)
             }
-            t = SystemClock.uptimeMillis()
         }
-        val (x, y) = points.last()
-        instrumentation.uiAutomation.injectInputEvent(event(MotionEvent.ACTION_UP, t + 8, x, y, 0f), true)
+        SystemClock.sleep(8)
+        instrumentation.uiAutomation.injectInputEvent(event(MotionEvent.ACTION_UP, SystemClock.uptimeMillis(), x, y, 0f), true)
         SystemClock.sleep(150)
     }
 

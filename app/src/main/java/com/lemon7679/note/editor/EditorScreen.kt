@@ -90,6 +90,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
@@ -260,7 +261,7 @@ fun NotebookEditor(app: AppModel, model: EditorModel) {
                 PageSidebar(model)
             }
             Box(Modifier.weight(1f).fillMaxHeight()) {
-                AndroidView(factory = { ctx -> CanvasView(ctx, model, host).also { canvas = it } }, modifier = Modifier.fillMaxSize(),
+                AndroidView(factory = { ctx -> CanvasView(ctx, model, host).also { canvas = it } }, modifier = Modifier.fillMaxSize().clipToBounds(),
                     update = { it.applySettings() })
                 BottomOverlay(model)
                 selectionAnchor?.let { anchor -> SelectionMenu(anchor, canvas) }

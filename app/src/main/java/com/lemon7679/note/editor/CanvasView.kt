@@ -386,6 +386,8 @@ class CanvasView(context: Context, private val model: EditorModel, private val h
     // ------------------------------------------------------------------ drawing
 
     override fun onDraw(canvas: Canvas) {
+        // Compose's AndroidView does not clip its view: keep the desk inside our bounds.
+        canvas.clipRect(0, 0, width, height)
         canvas.drawColor(deskColor)
         if (disposed) return
         val pages = model.document.pages
