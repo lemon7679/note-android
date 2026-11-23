@@ -131,6 +131,11 @@ class CanvasView(context: Context, private val model: EditorModel, private val h
     private var tapMaxFingers = 0
     private var tapDownTime = 0L
     private var tapMoved = false
+    private val fingerDown = HashMap<Int, Pair<Float, Float>>()   // where each finger touched down
+    private var gesturePinched = false                             // this touch sequence zoomed (no fling after)
+    // Eraser: dirty area accumulated between frames, rendered once per vsync.
+    private var eraseDirty: RectF? = null
+    private var erasePage: PageState? = null
     private var velocity: VelocityTracker? = null
     private val scroller = OverScroller(context)
     private val touchSlop = ViewConfiguration.get(context).scaledTouchSlop
@@ -240,6 +245,31 @@ class CanvasView(context: Context, private val model: EditorModel, private val h
             t.valid = true
         }
 
+        /** Redraws only `pageRect` (page units) of an already rendered tile. */
+        fun renderTilePart(t: Tile, pageRect: RectF) {
+            val bmp = t.bitmap ?: return renderTile(t)
+            val r = tileRect(t.key)
+            if (bmp.width != r.width() || bmp.height != r.height()) return renderTile(t)
+            val px = Rect(floor(pageRect.left * scale).toInt() - 1, floor(pageRect.top * scale).toInt() - 1,
+                ceil(pageRect.right * scale).toInt() + 1, ceil(pageRect.bottom * scale).toInt() + 1)
+            if (!px.intersect(r)) return
+            // Whole tile anyway (or nearly): skip the scratch copy.
+            if (px.width() * px.height() * 10 >= r.width() * r.height() * 8) return renderTile(t)
+            val part = scratchBitmap(px.width(), px.height())
+            val pdf = model.pdf
+            if (pdfIndex != null && pdf != null) {
+                val bg = t.background ?: run { renderTile(t); return }
+                Canvas(part).drawBitmap(bg, Rect(px.left - r.left, px.top - r.top, px.right - r.left, px.bottom - r.top),
+                    Rect(0, 0, px.width(), px.height()), clearPaint)
+            } else {
+                PageImageRenderer.drawBackground(page, null, part, scale, px.left.toFloat(), px.top.toFloat())
+            }
+            ink.renderOver(part, scale, -px.left.toFloat(), -px.top.toFloat())
+            Canvas(bmp).drawBitmap(part, Rect(0, 0, px.width(), px.height()),
+                Rect(px.left - r.left, px.top - r.top, px.right - r.left, px.bottom - r.top), clearPaint)
+            t.valid = true
+        }
+
         fun renderPreview() {
             val w = min(480, max(64, (page.size.width * layoutScale * 0.5f).toInt()))
             preview?.recycle()
@@ -257,6 +287,22 @@ class CanvasView(context: Context, private val model: EditorModel, private val h
             stale?.values?.forEach { recycle(it) }
             clearOverlay()
             preview?.recycle()
+        }
+    }
+
+    private var scratch: Bitmap? = null
+
+    /** A reusable bitmap of exactly w×h (reconfigured in place when it fits). */
+    private fun scratchBitmap(w: Int, h: Int): Bitmap {
+        val b = scratch
+        if (b != null && b.allocationByteCount >= w * h * 4) {
+            if (b.width != w || b.height != h) b.reconfigure(w, h, Bitmap.Config.ARGB_8888)
+            return b
+        }
+        b?.recycle()
+        return Bitmap.createBitmap(max(w, TILE), max(h, TILE), Bitmap.Config.ARGB_8888).also {
+            it.reconfigure(w, h, Bitmap.Config.ARGB_8888)
+            scratch = it
         }
     }
 
@@ -286,6 +332,8 @@ class CanvasView(context: Context, private val model: EditorModel, private val h
         states.clear()
         pool.forEach { it.recycle() }
         pool.clear()
+        scratch?.recycle()
+        scratch = null
         floating?.recycle()
         builder.dispose()
         model.canvas = null
@@ -569,6 +617,7 @@ class CanvasView(context: Context, private val model: EditorModel, private val h
             updateVisible()
             more = true
         }
+        flushEraseDirty()
         val pv = activePage
         if (mode == Mode.DRAWING && pv != null && builder.isActive) {
             if (builder.tick(SystemClock.uptimeMillis() / 1000.0)) performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
@@ -626,6 +675,8 @@ class CanvasView(context: Context, private val model: EditorModel, private val h
 
     /** Re-renders the ink tiles under `rect` right away (pen-up, erase), then the rest lazily. */
     private fun refreshNow(s: PageState, rect: RectF?) {
+        // Tiles that were fully up to date only need `rect` redrawn; others are redrawn whole.
+        val upToDate = rect?.let { r -> s.keys(r).filter { s.tiles[it]?.valid == true }.toHashSet() } ?: emptySet<Long>()
         s.invalidate(rect)
         val frame = frameOf(s.page.id) ?: return
         val visible = visibleContent()
@@ -637,9 +688,18 @@ class CanvasView(context: Context, private val model: EditorModel, private val h
         if (area.isEmpty) return
         for (k in s.keys(area)) {
             val t = s.tiles.getOrPut(k) { Tile(k, null) }
-            s.renderTile(t)
+            // A tile that was valid only needs the damaged part redrawn; a new one is drawn whole.
+            if (rect != null && k in upToDate) s.renderTilePart(t, rect) else s.renderTile(t)
         }
         scheduleFrame()
+    }
+
+    private fun flushEraseDirty() {
+        val d = eraseDirty ?: return
+        val s = erasePage
+        eraseDirty = null
+        erasePage = null
+        if (s != null && states[s.page.id] === s) refreshNow(s, d)
     }
 
     // ------------------------------------------------------------------ input
@@ -682,10 +742,11 @@ class CanvasView(context: Context, private val model: EditorModel, private val h
         when (e.actionMasked) {
             MotionEvent.ACTION_DOWN, MotionEvent.ACTION_POINTER_DOWN -> pointerDown(e, e.actionIndex)
             MotionEvent.ACTION_MOVE -> move(e)
-            MotionEvent.ACTION_UP, MotionEvent.ACTION_POINTER_UP -> pointerUp(e, e.actionIndex, cancelled = false)
+            MotionEvent.ACTION_UP, MotionEvent.ACTION_POINTER_UP -> pointerUp(e, e.actionIndex, cancelledEvent = false)
             MotionEvent.ACTION_CANCEL -> {
-                for (i in 0 until e.pointerCount) pointerUp(e, i, cancelled = true)
+                for (i in 0 until e.pointerCount) pointerUp(e, i, cancelledEvent = true)
                 fingers.clear()
+                fingerDown.clear()
             }
         }
         return true
@@ -698,6 +759,8 @@ class CanvasView(context: Context, private val model: EditorModel, private val h
             tapCandidate = true
             tapMaxFingers = 0
             tapMoved = false
+            gesturePinched = false
+            fingerDown.clear()
             tapDownTime = e.eventTime
             velocity?.recycle()
             velocity = VelocityTracker.obtain()
@@ -712,7 +775,10 @@ class CanvasView(context: Context, private val model: EditorModel, private val h
                     builder.cancel()
                     activePage?.clearOverlay()
                     resetInteraction()
-                    for (k in 0 until e.pointerCount) fingers[e.getPointerId(k)] = e.getX(k) to e.getY(k)
+                    for (k in 0 until e.pointerCount) {
+                        fingers[e.getPointerId(k)] = e.getX(k) to e.getY(k)
+                        fingerDown[e.getPointerId(k)] = e.getX(k) to e.getY(k)
+                    }
                     beginGesture()
                 } else {
                     builder.setShapeConstraint(true)
@@ -727,6 +793,7 @@ class CanvasView(context: Context, private val model: EditorModel, private val h
         }
         if (!isStylus(e, i)) {
             fingers[id] = e.getX(i) to e.getY(i)
+            fingerDown[id] = e.getX(i) to e.getY(i)
             tapMaxFingers = max(tapMaxFingers, fingers.size)
             beginGesture()
         }
@@ -826,18 +893,25 @@ class CanvasView(context: Context, private val model: EditorModel, private val h
         velocity?.addMovement(e)
         // Fingers (scroll / zoom).
         if (fingers.isNotEmpty()) {
+            val wasMoved = tapMoved
             for (k in 0 until e.pointerCount) {
                 val id = e.getPointerId(k)
                 if (fingers.containsKey(id)) {
-                    val old = fingers[id]!!
-                    if (hypot(e.getX(k) - old.first, e.getY(k) - old.second) > touchSlop) tapMoved = true
+                    // Slop is measured from where the finger touched down, not from the previous
+                    // event: slow pinches/pans move only a few px per event and were never recognized,
+                    // then a single fast event applied the whole accumulated zoom at once.
+                    val start = fingerDown.getOrPut(id) { e.getX(k) to e.getY(k) }
+                    if (hypot(e.getX(k) - start.first, e.getY(k) - start.second) > touchSlop) tapMoved = true
                     fingers[id] = e.getX(k) to e.getY(k)
                 }
             }
+            // Start moving from where the fingers are now, so crossing the slop doesn't jump.
+            if (mode == Mode.GESTURE && tapMoved && !wasMoved) beginGesture()
             if (mode == Mode.GESTURE && tapMoved) {
                 val (cx, cy, span) = centroid()
                 if (fingers.size >= 2) {
                     zoom = (gestureStartZoom * span / gestureStartSpan).coerceIn(0.5f, 5f)
+                    if (abs(zoom - gestureStartZoom) > 0.001f) gesturePinched = true
                     offX = cx - gestureAnchor.first * zoom
                     offY = cy - gestureAnchor.second * zoom
                 } else if (settings.stylusOnly || fingers.size >= 2) {
@@ -869,8 +943,13 @@ class CanvasView(context: Context, private val model: EditorModel, private val h
                 val (x, y) = toPage(frame, e.getX(i), e.getY(i))
                 if (s.ink.eraseMove(x, y)) erased = true
                 eraserPoint = x to y
-                s.ink.takeDirty()?.let { refreshNow(s, it) }
-                invalidate()
+                // Stylus input is unbuffered (up to 240 Hz): re-rendering on every event made erasing
+                // (wide highlighter strokes especially) lag. Collect the damage and redraw once per frame.
+                s.ink.takeDirty()?.let { d ->
+                    erasePage = s
+                    eraseDirty = eraseDirty?.apply { union(d) } ?: RectF(d)
+                }
+                scheduleFrame()
             }
             Mode.LASSO -> if (s != null) {
                 val frame = frameOf(s.page.id) ?: return
@@ -900,10 +979,13 @@ class CanvasView(context: Context, private val model: EditorModel, private val h
         }
     }
 
-    private fun pointerUp(e: MotionEvent, i: Int, cancelled: Boolean) {
+    private fun pointerUp(e: MotionEvent, i: Int, cancelledEvent: Boolean) {
+        // Android reports rejected palms as POINTER_UP / UP with FLAG_CANCELED.
+        val cancelled = cancelledEvent || (e.flags and MotionEvent.FLAG_CANCELED) != 0
         val id = e.getPointerId(i)
         if (fingers.containsKey(id)) {
             fingers.remove(id)
+            fingerDown.remove(id)
             velocity?.addMovement(e)
             if (fingers.isEmpty()) {
                 val tapLike = !tapMoved && e.eventTime - tapDownTime < 350 && !cancelled
@@ -912,9 +994,13 @@ class CanvasView(context: Context, private val model: EditorModel, private val h
                 } else if (tapLike && tapMaxFingers == 1 && model.app.strokeClipboard != null && tools.tool == EditorTool.LASSO) {
                     // nothing: long-press paste is offered from the menu
                 } else if (mode == Mode.GESTURE && tapMoved) {
+                    // Velocity of the finger that lifted last (the default is pointer 0's, which may
+                    // be long gone); no fling after a pinch — the lifting finger's pinch motion
+                    // would otherwise send the page sliding.
                     velocity?.computeCurrentVelocity(1000)
-                    val vxv = velocity?.xVelocity ?: 0f
-                    val vyv = velocity?.yVelocity ?: 0f
+                    val fling = !gesturePinched && !cancelled
+                    val vxv = if (fling) velocity?.getXVelocity(id) ?: 0f else 0f
+                    val vyv = if (fling) velocity?.getYVelocity(id) ?: 0f else 0f
                     endGesture(vxv, vyv)
                 }
                 if (mode == Mode.GESTURE) mode = Mode.IDLE
@@ -946,6 +1032,7 @@ class CanvasView(context: Context, private val model: EditorModel, private val h
             }
             Mode.ERASING -> if (s != null) {
                 s.ink.eraseEnd()
+                flushEraseDirty()
                 refreshNow(s, s.ink.takeDirty())
                 eraserPoint = null
                 if (erased) model.noteInkEdit(s.page.id)
