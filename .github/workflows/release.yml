@@ -1,0 +1,123 @@
+name: Release
+
+# Builds the release APK (arm64-v8a, armeabi-v7a, x86_64; Android 10+) against note-core
+# and publishes a GitHub Release with it.
+#
+#  - Run manually (Actions → Release → Run workflow): enter the version; the tag
+#    v<version> is created on the commit the workflow runs on.
+#  - Or push a `v*` tag.
+#
+# Signing: set the repository secrets NOTE_KEYSTORE_BASE64 (base64 of a .jks),
+# NOTE_KEYSTORE_PASSWORD, NOTE_KEY_ALIAS and NOTE_KEY_PASSWORD to sign every release
+# with the same key (so updates install over the previous version). Without them the
+# APK is signed with a key generated for this build only.
+#
+# Release notes come from docs/releases/v<version>.md; build details are appended.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version without "v" (e.g. 0.1.0)
+        required: true
+      core_ref:
+        description: note-core branch, tag or commit to build with
+        default: main
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: lemon7679/note-core
+          ref: ${{ inputs.core_ref || 'main' }}
+          path: note-core
+      - name: Place note-core next to note-android
+        run: mv note-core ../note-core
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Version
+        id: v
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            version="${{ inputs.version }}"
+          else
+            version="${GITHUB_REF_NAME#v}"
+          fi
+          version="${version#v}"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=v$version" >> "$GITHUB_OUTPUT"
+          echo "Releasing v$version from $GITHUB_SHA"
+      - name: Signing key
+        id: key
+        env:
+          KEYSTORE_B64: ${{ secrets.NOTE_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.NOTE_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.NOTE_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.NOTE_KEY_PASSWORD }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/key"
+          if [ -n "$KEYSTORE_B64" ]; then
+            echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/key/release.jks"
+            echo "NOTE_KEYSTORE_PASSWORD=$KEYSTORE_PASSWORD" >> "$GITHUB_ENV"
+            echo "NOTE_KEY_ALIAS=$KEY_ALIAS" >> "$GITHUB_ENV"
+            echo "NOTE_KEY_PASSWORD=$KEY_PASSWORD" >> "$GITHUB_ENV"
+            echo "kind=repository secret" >> "$GITHUB_OUTPUT"
+          else
+            pass=$(openssl rand -hex 16)
+            echo "::add-mask::$pass"
+            keytool -genkeypair -keystore "$RUNNER_TEMP/key/release.jks" -storetype PKCS12 -alias note \
+              -keyalg RSA -keysize 3072 -validity 10000 -storepass "$pass" -keypass "$pass" \
+              -dname "CN=Note for Android, O=lemon7679" > /dev/null
+            echo "NOTE_KEYSTORE_PASSWORD=$pass" >> "$GITHUB_ENV"
+            echo "NOTE_KEY_ALIAS=note" >> "$GITHUB_ENV"
+            echo "NOTE_KEY_PASSWORD=$pass" >> "$GITHUB_ENV"
+            echo "kind=build-only key (set NOTE_KEYSTORE_* secrets for update-compatible releases)" >> "$GITHUB_OUTPUT"
+          fi
+          echo "NOTE_KEYSTORE=$RUNNER_TEMP/key/release.jks" >> "$GITHUB_ENV"
+      - name: Unit tests
+        run: ./gradlew --no-daemon :app:testDebugUnitTest
+      - name: Build release APK
+        run: |
+          ./gradlew --no-daemon -PnoteVersion=${{ steps.v.outputs.version }} :app:assembleRelease
+          mkdir -p dist
+          cp app/build/outputs/apk/release/app-release.apk "dist/Note-${{ steps.v.outputs.version }}.apk"
+          BT=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
+          "$BT/apksigner" verify --print-certs "dist/Note-${{ steps.v.outputs.version }}.apk" | tee dist/signature.txt
+          "$BT/aapt2" dump badging "dist/Note-${{ steps.v.outputs.version }}.apk" | head -3
+          unzip -l "dist/Note-${{ steps.v.outputs.version }}.apk" | grep libnoteink
+          (cd dist && sha256sum Note-*.apk > SHA256SUMS.txt && cat SHA256SUMS.txt)
+      - name: Release notes
+        run: |
+          notes="docs/releases/${{ steps.v.outputs.tag }}.md"
+          if [ -f "$notes" ]; then cp "$notes" dist/NOTES.md; else echo "Note for Android ${{ steps.v.outputs.tag }}" > dist/NOTES.md; fi
+          {
+            echo
+            echo "### 빌드 정보"
+            echo
+            echo "- note-android \`$(git rev-parse --short HEAD)\` · note-core \`$(git -C ../note-core rev-parse --short HEAD)\`"
+            echo "- Android 10 (API 29) 이상 · arm64-v8a / armeabi-v7a / x86_64 · targetSdk 35"
+            echo "- 서명: ${{ steps.key.outputs.kind }} · 인증서 SHA-256 \`$(grep -m1 'SHA-256 digest' dist/signature.txt | awk '{print $NF}')\`"
+            echo "- APK SHA-256 \`$(cut -d' ' -f1 dist/SHA256SUMS.txt)\`"
+          } >> dist/NOTES.md
+          cat dist/NOTES.md
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.v.outputs.tag }}
+          target_commitish: ${{ github.sha }}
+          name: Note for Android ${{ steps.v.outputs.tag }}
+          body_path: dist/NOTES.md
+          files: |
+            dist/Note-*.apk
+            dist/SHA256SUMS.txt

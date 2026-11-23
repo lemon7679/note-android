@@ -1,0 +1,99 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Unit tests and APK (real engine)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: lemon7679/note-core
+          path: note-core
+      - name: Place note-core next to note-android
+        run: mv note-core ../note-core
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Unit tests (sync engine, NAS clients, file format)
+        run: ./gradlew --no-daemon :app:testDebugUnitTest
+      - name: Build debug APK and instrumentation tests
+        run: ./gradlew --no-daemon :app:assembleDebug :app:assembleDebugAndroidTest
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unit-test-reports
+          path: app/build/reports/tests
+          if-no-files-found: ignore
+
+  emulator:
+    name: Emulator run (${{ matrix.profile }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        profile: [pixel_c, pixel_6]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: lemon7679/note-core
+          path: note-core
+      - name: Place note-core next to note-android
+        run: mv note-core ../note-core
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - name: WebDAV server for the sync test (rclone, reached from the emulator at 10.0.2.2)
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq rclone imagemagick > /dev/null
+          mkdir -p /tmp/nas/Notes
+          printf '%%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 595 842]>>endobj\ntrailer<</Root 1 0 R>>\n%%%%EOF\n' > /tmp/nas/Notes/shared.pdf
+          nohup rclone serve webdav /tmp/nas --addr 0.0.0.0:8080 --user note --pass secret > /tmp/rclone.log 2>&1 &
+          sleep 2
+          curl -s -o /dev/null -w "webdav %{http_code}\n" -u note:secret -X PROPFIND -H "Depth: 1" http://127.0.0.1:8080/Notes/
+      - name: Build
+        run: ./gradlew --no-daemon :app:assembleDebug :app:assembleDebugAndroidTest
+      - name: Run on the emulator, screenshot
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          target: google_apis
+          arch: x86_64
+          profile: ${{ matrix.profile }}
+          disable-animations: true
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
+          script: ci/emulator-smoke.sh ${{ matrix.profile }}
+      - name: The notebook reached the WebDAV server
+        run: |
+          find /tmp/nas -maxdepth 4 | head -40
+          test -f "/tmp/nas/Notes/NAS 노트.inknote/document.json"
+      - name: Upload screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: screenshots-${{ matrix.profile }}
+          path: shots-*
+          if-no-files-found: ignore
