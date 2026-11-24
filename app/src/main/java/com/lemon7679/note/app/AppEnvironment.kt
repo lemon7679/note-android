@@ -88,6 +88,9 @@ data class AppSettings(
     val tapGesturesUndo: Boolean = true,
     /** 낙서로 지우기: scribbling back and forth over ink with the pen erases it. */
     val scribbleToErase: Boolean = true,
+    /** Render ink with the GPU (OpenGL ES 3): page tiles on worker threads and the stroke being
+     *  drawn on a low-latency front buffer. Falls back to the CPU where unsupported. */
+    val gpuRendering: Boolean = true,
     val defaultTemplate: PaperTemplate = PaperTemplate.RULED,
     val defaultPaperColor: PaperColor = PaperColor.WHITE,
     val defaultSize: PageSizePreset = PageSizePreset.A4,

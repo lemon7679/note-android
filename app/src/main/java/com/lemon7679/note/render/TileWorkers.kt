@@ -54,7 +54,11 @@ class TileWorkers(threads: Int = defaultThreads()) {
     private val executor = ThreadPoolExecutor(threads, threads, 30, TimeUnit.SECONDS, queue) { r ->
         Thread({
             Process.setThreadPriority(Process.THREAD_PRIORITY_DEFAULT)
-            r.run()
+            try {
+                r.run()
+            } finally {
+                GpuTiles.releaseThread()   // the worker's EGL context, if it made one
+            }
         }, "ink-tiles-${threadIds.incrementAndGet()}")
     }.apply { allowCoreThreadTimeOut(true) }
 

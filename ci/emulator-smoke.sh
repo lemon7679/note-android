@@ -54,6 +54,8 @@ for f in "shots-$TAG"/10-*.png; do
   convert "$f" -resize 1100x1100 -quality 55 "${f%.png}.jpg" 2>/dev/null && { echo "@@SHOT $name"; base64 -w 120 "${f%.png}.jpg"; echo "@@END"; }
 done
 
+echo "== GPU rendering (tile workers, live front buffer)"
+adb logcat -d -v brief -s GpuTiles:V LiveInkLayer:V InkGpu:V | tail -20 || true
 echo "== app log (errors)"
 adb logcat -d -v brief '*:E' | grep -iE "lemon7679|AndroidRuntime|FATAL|noteink" | tail -80 || true
 echo "== instrumentation result"

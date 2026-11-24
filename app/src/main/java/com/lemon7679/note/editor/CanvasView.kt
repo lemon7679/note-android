@@ -32,6 +32,7 @@ import com.lemon7679.note.ink.SnappedShape
 import com.lemon7679.note.ink.StrokeBuilder
 import com.lemon7679.note.render.BitmapPool
 import com.lemon7679.note.render.ElementDrawing
+import com.lemon7679.note.render.GpuTiles
 import com.lemon7679.note.render.PageImageRenderer
 import com.lemon7679.note.render.PaperRenderer
 import com.lemon7679.note.render.PdfSupport
@@ -112,6 +113,11 @@ class CanvasView(context: Context, private val model: EditorModel, private val h
     private val renderScale get() = layoutScale * renderZoom
 
     private val states = HashMap<String, PageState>()
+
+    /** Front-buffered GPU layer above this view for the stroke being drawn (null = not available). */
+    var liveLayer: LiveInkLayer? = null
+    /** The current stroke is drawn on [liveLayer] instead of the in-view overlay. */
+    private var gpuLive = false
     private val builder = StrokeBuilder(com.lemon7679.note.ink.BrushKind.BALLPOINT).apply { setBuiltinPrediction(true) }
     private val pool = BitmapPool(TILE)
     private val workers = TileWorkers()
@@ -298,7 +304,7 @@ class CanvasView(context: Context, private val model: EditorModel, private val h
                 return
             }
             t.requested = t.version
-            workers.submit(TileJob(this, t, t.version, scale, r, snapshot.retain(), t.background, priority))
+            workers.submit(TileJob(this, t, t.version, scale, r, snapshot.retain(), t.background, priority, settings.gpuRendering))
         }
 
         fun requestPreview(snapshot: InkSnapshot) {
@@ -352,7 +358,7 @@ class CanvasView(context: Context, private val model: EditorModel, private val h
     /** Renders one tile on a worker: background (paper / PDF) + ink from the snapshot. */
     private inner class TileJob(
         val s: PageState, val t: Tile, val version: Int, val scale: Float, val r: Rect,
-        val snapshot: InkSnapshot, val background: Bitmap?, priority: Float,
+        val snapshot: InkSnapshot, val background: Bitmap?, priority: Float, val gpu: Boolean,
     ) : TileWorkers.Job(s, priority) {
         private val page = s.page
         private val pdf = model.pdf
@@ -375,7 +381,9 @@ class CanvasView(context: Context, private val model: EditorModel, private val h
                 } else {
                     PageImageRenderer.drawBackground(page, null, out, scale, r.left.toFloat(), r.top.toFloat())
                 }
-                snapshot.renderOver(out, scale, -r.left.toFloat(), -r.top.toFloat())
+                // GPU on this worker's own GL context when possible, the CPU rasterizer otherwise.
+                if (!(gpu && GpuTiles.renderOver(snapshot, out, scale, -r.left.toFloat(), -r.top.toFloat())))
+                    snapshot.renderOver(out, scale, -r.left.toFloat(), -r.top.toFloat())
                 val bg = newBackground
                 return { deliverTile(this, out, bg) }
             } catch (e: Throwable) {
@@ -508,6 +516,8 @@ class CanvasView(context: Context, private val model: EditorModel, private val h
         scratch = null
         floating?.recycle()
         builder.dispose()
+        liveLayer?.release()
+        liveLayer = null
         model.canvas = null
     }
 
@@ -793,7 +803,8 @@ class CanvasView(context: Context, private val model: EditorModel, private val h
         val pv = activePage
         if (mode == Mode.DRAWING && pv != null && builder.isActive) {
             if (builder.tick(SystemClock.uptimeMillis() / 1000.0)) performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
-            updateLive(pv, builder.updateGeometry(pv.scale))
+            val dirty = builder.updateGeometry(pv.scale)
+            if (gpuLive) drawLiveGpu(pv, dirty) else updateLive(pv, dirty)
             more = true
         }
         // Ask the workers for missing / outdated tiles, nearest to the middle of the screen first.
@@ -833,6 +844,28 @@ class CanvasView(context: Context, private val model: EditorModel, private val h
         }
         if (more || laser.isNotEmpty() || highlight != null && SystemClock.uptimeMillis() < highlightUntil) scheduleFrame()
         else invalidate()
+    }
+
+    /** Hands the changed part of the live stroke to the front-buffered GPU layer. */
+    private fun drawLiveGpu(s: PageState, dirty: RectF?) {
+        val layer = liveLayer ?: return
+        dirty ?: return
+        val frame = frameOf(s.page.id) ?: return
+        layer.draw(builder.captureLive(dirty), layoutScale * zoom, frame.left * zoom + offX, frame.top * zoom + offY)
+    }
+
+    /**
+     * Pen-up / cancel of a stroke drawn on the live layer: once this view's frame with the
+     * updated tiles has been handed to the display, the layer is hidden (a frame later, so
+     * the two overlap rather than leave a gap).
+     */
+    private fun endLiveStroke() {
+        if (!gpuLive) return
+        gpuLive = false
+        val layer = liveLayer ?: return
+        val token = layer.endStroke()
+        invalidate()
+        viewTreeObserver.registerFrameCommitCallback { postOnAnimation { liveLayer?.finish(token) } }
     }
 
     private fun updateLive(s: PageState, dirty: RectF?) {
@@ -969,6 +1002,7 @@ class CanvasView(context: Context, private val model: EditorModel, private val h
                 if (!stylusDrawing && e.eventTime - drawStart < 250) {
                     builder.cancel()
                     activePage?.clearOverlay()
+                    endLiveStroke()
                     resetInteraction()
                     for (k in 0 until e.pointerCount) {
                         fingers[e.getPointerId(k)] = e.getX(k) to e.getY(k)
@@ -1041,6 +1075,8 @@ class CanvasView(context: Context, private val model: EditorModel, private val h
                 builder.setShapeConstraint(fingers.isNotEmpty())
                 s.clearOverlay()
                 s.overlayMultiply = tool == EditorTool.HIGHLIGHTER
+                // Multiply (highlighter) needs the page under it: that stays on the in-view overlay.
+                gpuLive = settings.gpuRendering && liveLayer?.ready == true && !builder.blendsMultiply
                 val first = sample(e, i, frame)
                 strokePoints.clear()
                 strokePoints += first.x to first.y
@@ -1219,6 +1255,7 @@ class CanvasView(context: Context, private val model: EditorModel, private val h
                 if (cancelled) {
                     builder.cancel()
                     s.clearOverlay()
+                    endLiveStroke()
                 } else {
                     feed(e, i, s)
                     builder.end()
@@ -1228,6 +1265,7 @@ class CanvasView(context: Context, private val model: EditorModel, private val h
                         s.clearOverlay()                    // …then drop the overlay: no flicker
                         if (strokeId != 0L) model.noteInkEdit(s.page.id)
                     }
+                    endLiveStroke()
                 }
                 strokePoints.clear()
             }

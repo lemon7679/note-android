@@ -261,8 +261,18 @@ fun NotebookEditor(app: AppModel, model: EditorModel) {
                 PageSidebar(model)
             }
             Box(Modifier.weight(1f).fillMaxHeight()) {
-                AndroidView(factory = { ctx -> CanvasView(ctx, model, host).also { canvas = it } }, modifier = Modifier.fillMaxSize().clipToBounds(),
-                    update = { it.applySettings() })
+                AndroidView(factory = { ctx ->
+                    // The canvas, with the front-buffered GPU layer for the live stroke above it.
+                    android.widget.FrameLayout(ctx).apply {
+                        val view = CanvasView(ctx, model, host).also { canvas = it }
+                        addView(view, android.widget.FrameLayout.LayoutParams(-1, -1))
+                        runCatching { LiveInkLayer(ctx) }.getOrNull()?.let { live ->
+                            addView(live, android.widget.FrameLayout.LayoutParams(-1, -1))
+                            view.liveLayer = live
+                        }
+                    }
+                }, modifier = Modifier.fillMaxSize().clipToBounds(),
+                    update = { (it.getChildAt(0) as? CanvasView)?.applySettings() })
                 BottomOverlay(model)
                 selectionAnchor?.let { anchor -> SelectionMenu(anchor, canvas) }
                 elementMenu?.let { (pageId, element, anchor) ->

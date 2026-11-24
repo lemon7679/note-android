@@ -578,6 +578,13 @@ fun SettingsScreen(app: AppModel, onEditAccount: (NasAccount) -> Unit, onDismiss
                 Box(Modifier.padding(horizontal = 16.dp)) {
                     OptionToggle("낙서로 지우기", s.scribbleToErase, "펜으로 글씨 위를 여러 번 왔다 갔다 문지르면 그 아래 필기가 지워집니다.") { v -> app.updateSettings { it.copy(scribbleToErase = v) } }
                 }
+                CardDivider()
+                Box(Modifier.padding(horizontal = 16.dp)) {
+                    OptionToggle("GPU 렌더링", s.gpuRendering,
+                        "그래픽 칩으로 필기를 그려 확대·스크롤이 빠르고, 펜 끝 지연이 줄어듭니다. 화면이 이상하면 꺼 보세요.") { v ->
+                        app.updateSettings { it.copy(gpuRendering = v) }
+                    }
+                }
             }
             Spacer(Modifier.height(12.dp))
             SectionLabel("새 노트 기본값")

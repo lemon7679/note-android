@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "ink/ink_c.h"
+#include "ink/ink_gpu.h"
 
 namespace {
 
@@ -339,6 +340,41 @@ JNIEXPORT jbyteArray FN(snapshotSave)(JNIEnv* env, jclass, jlong s) {
   jbyteArray out = toJava(env, data, size);
   ink_free(data);
   return out;
+}
+
+// ---------------------------------------------------------------- GPU (OpenGL ES 3)
+// Context-bound: every call on the thread whose EGL context is current.
+
+JNIEXPORT jlong FN(gpuContextCreate)(JNIEnv*, jclass) { return reinterpret_cast<jlong>(ink_gpu_context_create()); }
+JNIEXPORT void FN(gpuContextDestroy)(JNIEnv*, jclass, jlong c) {
+  ink_gpu_context_destroy(reinterpret_cast<InkGpuContext*>(c));
+}
+JNIEXPORT jlong FN(gpuCreate)(JNIEnv*, jclass) { return reinterpret_cast<jlong>(ink_gpu_create()); }
+JNIEXPORT void FN(gpuDestroy)(JNIEnv*, jclass, jlong g) { ink_gpu_destroy(reinterpret_cast<InkGpu*>(g)); }
+JNIEXPORT jstring FN(gpuDescription)(JNIEnv* env, jclass, jlong g) {
+  return env->NewStringUTF(ink_gpu_description(reinterpret_cast<InkGpu*>(g)));
+}
+JNIEXPORT jboolean FN(gpuRenderSnapshotOver)(JNIEnv* env, jclass, jlong g, jlong s, jobject bitmap, jfloat scale,
+                                             jfloat ox, jfloat oy) {
+  LockedBitmap bm(env, bitmap);
+  if (!bm) return false;
+  return ink_gpu_render_snapshot_over_rgba(reinterpret_cast<InkGpu*>(g), reinterpret_cast<const InkSnapshot*>(s),
+                                           bm.data(), static_cast<int>(bm.info.width),
+                                           static_cast<int>(bm.info.height), bm.info.stride, scale, ox, oy);
+}
+JNIEXPORT jlong FN(builderCaptureLive)(JNIEnv*, jclass, jlong b, jboolean hasRegion, jfloat x, jfloat y, jfloat w,
+                                       jfloat h) {
+  InkRect r{x, y, w, h};
+  return reinterpret_cast<jlong>(ink_builder_capture_live(B(b), hasRegion ? &r : nullptr));
+}
+JNIEXPORT void FN(liveRelease)(JNIEnv*, jclass, jlong f) { ink_live_frame_release(reinterpret_cast<InkLiveFrame*>(f)); }
+JNIEXPORT jboolean FN(gpuDrawLive)(JNIEnv* env, jclass, jlong g, jlong f, jint pw, jint ph, jint fw, jint fh,
+                                   jfloatArray clip, jfloat scale, jfloat ox, jfloat oy) {
+  float m[16];
+  bool hasClip = clip && env->GetArrayLength(clip) >= 16;
+  if (hasClip) env->GetFloatArrayRegion(clip, 0, 16, m);
+  return ink_gpu_draw_live(reinterpret_cast<InkGpu*>(g), reinterpret_cast<const InkLiveFrame*>(f), pw, ph, fw, fh,
+                           hasClip ? m : nullptr, scale, ox, oy);
 }
 
 }  // extern "C"

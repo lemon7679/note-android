@@ -160,6 +160,15 @@ class StrokeBuilder(kind: BrushKind) {
     fun updateGeometry(pixelsPerUnit: Float): RectF? =
         rectOrNull(InkNative.builderUpdateGeometry(handle, pixelsPerUnit, rect), rect)
 
+    /**
+     * Copy of the live stroke (from the last `updateGeometry`) for the GPU thread: only what
+     * touches `region` (page units) when given, else the whole stroke. 0 when nothing is drawn.
+     * Release with [InkNative.liveRelease].
+     */
+    fun captureLive(region: RectF?): Long =
+        if (region == null) InkNative.builderCaptureLive(handle, false, 0f, 0f, 0f, 0f)
+        else InkNative.builderCaptureLive(handle, true, region.left, region.top, region.width(), region.height())
+
     /** Draws the live stroke (from the last `updateGeometry`) over a premultiplied ARGB_8888 bitmap. */
     fun renderOver(bitmap: Bitmap, scale: Float, offsetX: Float, offsetY: Float) =
         InkNative.builderRenderOver(handle, bitmap, scale, offsetX, offsetY)
@@ -189,6 +198,10 @@ class InkSnapshot internal constructor(private val handle: Long) {
 
     /** Same bytes as [InkPage.save] at the time of the snapshot. */
     fun save(): ByteArray? = InkNative.snapshotSave(handle)
+
+    /** GPU version of [renderOver] on the calling thread's GL context; false = use the CPU. */
+    internal fun renderOverGpu(gpu: Long, bitmap: Bitmap, scale: Float, offsetX: Float, offsetY: Float): Boolean =
+        InkNative.gpuRenderSnapshotOver(gpu, handle, bitmap, scale, offsetX, offsetY)
 }
 
 /** One page of ink with its own undo history. */
@@ -381,4 +394,16 @@ object InkNative {
     @JvmStatic external fun snapshotRelease(s: Long)
     @JvmStatic external fun snapshotRenderOver(s: Long, bitmap: Bitmap, scale: Float, ox: Float, oy: Float)
     @JvmStatic external fun snapshotSave(s: Long): ByteArray?
+
+    // GPU (OpenGL ES 3): call on the thread whose EGL context is current.
+    @JvmStatic external fun gpuContextCreate(): Long
+    @JvmStatic external fun gpuContextDestroy(c: Long)
+    @JvmStatic external fun gpuCreate(): Long
+    @JvmStatic external fun gpuDestroy(g: Long)
+    @JvmStatic external fun gpuDescription(g: Long): String
+    @JvmStatic external fun gpuRenderSnapshotOver(g: Long, s: Long, bitmap: Bitmap, scale: Float, ox: Float, oy: Float): Boolean
+    @JvmStatic external fun builderCaptureLive(b: Long, hasRegion: Boolean, x: Float, y: Float, w: Float, h: Float): Long
+    @JvmStatic external fun liveRelease(f: Long)
+    @JvmStatic external fun gpuDrawLive(g: Long, f: Long, pw: Int, ph: Int, fw: Int, fh: Int, clip: FloatArray?,
+                                        scale: Float, ox: Float, oy: Float): Boolean
 }
