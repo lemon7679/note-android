@@ -71,8 +71,13 @@ class TileWorkers(threads: Int = defaultThreads()) {
     /** Discards queued (not yet running) jobs of `owner`, or all queued jobs when null. */
     fun cancel(owner: Any? = null) {
         val removed = ArrayList<Runnable>()
-        if (owner == null) queue.drainTo(removed)
-        else queue.removeAll { r -> ((r as Task).job.owner === owner).also { if (it) removed += r } }
+        if (owner == null) {
+            queue.drainTo(removed)
+        } else {
+            // Only what remove() actually took out of the queue: a worker may grab a job
+            // between the scan and the removal, and then it runs (and releases) itself.
+            for (r in queue.toTypedArray()) if ((r as Task).job.owner === owner && queue.remove(r)) removed += r
+        }
         for (r in removed) (r as Task).job.dropped()
     }
 

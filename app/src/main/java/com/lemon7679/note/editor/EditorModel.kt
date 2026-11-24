@@ -520,9 +520,14 @@ class EditorModel(val app: AppModel, val ref: LibraryRef, file: File) {
     }
 
     /** Saves, hands a flattened PDF to the app when the account wants PDF copies, and frees the engine pages. */
+    /** True once [close] has run: the ink pages are disposed, views must stop using them. */
+    var closed = false
+        private set
+
     fun close() {
         if (document.lastPageIndex != currentPageIndex) documentDirty = true
         save()
+        closed = true
         app.documentClosed(OpenDocument(ref, pkg.dir, OpenDocument.Kind.NOTEBOOK)) { runCatching { exportPdf() }.getOrNull() }
         pages.values.forEach { it.dispose() }
         pages.clear()

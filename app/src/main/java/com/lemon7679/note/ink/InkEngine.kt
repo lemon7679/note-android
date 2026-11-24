@@ -212,7 +212,11 @@ class InkPage(width: Float, height: Float) {
         return result
     }
 
+    private var disposed = false
+
     fun dispose() {
+        if (disposed) return
+        disposed = true
         snapshot?.release()
         snapshot = null
         InkNative.editorDestroy(handle)

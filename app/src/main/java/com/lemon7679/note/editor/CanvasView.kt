@@ -780,7 +780,7 @@ class CanvasView(context: Context, private val model: EditorModel, private val h
 
     override fun doFrame(frameTimeNanos: Long) {
         frameScheduled = false
-        if (disposed) return
+        if (disposed || model.closed) return
         var more = false
         if (scroller.computeScrollOffset()) {
             offX = scroller.currX.toFloat()
@@ -933,7 +933,7 @@ class CanvasView(context: Context, private val model: EditorModel, private val h
 
     @SuppressLint("ClickableViewAccessibility")
     override fun onTouchEvent(e: MotionEvent): Boolean {
-        if (disposed) return false
+        if (disposed || model.closed) return false
         when (e.actionMasked) {
             MotionEvent.ACTION_DOWN, MotionEvent.ACTION_POINTER_DOWN -> pointerDown(e, e.actionIndex)
             MotionEvent.ACTION_MOVE -> move(e)
