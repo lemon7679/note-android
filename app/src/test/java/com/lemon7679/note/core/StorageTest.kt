@@ -123,5 +123,23 @@ class StorageTest {
         assertEquals(2.5f, outlines[1].strokeWidth)
         assertEquals(0.2f, outlines[1].opacity, 1e-6f)
         assertTrue(outlines[1].multiply)
+        assertTrue(outlines[0].holes.isEmpty())
+    }
+
+    @Test fun parsesEraserMasks() {
+        val svg = """
+            <svg xmlns="http://www.w3.org/2000/svg" width="200pt" height="100pt" viewBox="0 0 200 100">
+            <g>
+            <mask id="e7" maskUnits="userSpaceOnUse" x="0" y="0" width="50" height="50"><rect x="0" y="0" width="50" height="50" fill="#ffffff"/><polygon points="1,1 4,1 4,4 1,4" fill="#000000"/><polygon points="5,5 6,5 6,6" fill="#000000"/></mask>
+            <path d="M0,0 L40,0 40,40 0,40Z" fill="#ffe45c" mask="url(#e7)" style="mix-blend-mode:multiply"/>
+            <path d="M0,0 L10,0 10,10Z" fill="#1c1c1e"/>
+            </g>
+            </svg>
+        """.trimIndent()
+        val outlines = InkOutlineParser.parse(svg)
+        assertEquals(2, outlines.size)  // mask shapes are not ink
+        assertEquals(2, outlines[0].holes.size)
+        assertEquals(listOf(1f, 1f, 4f, 1f, 4f, 4f, 1f, 4f), outlines[0].holes[0].toList())
+        assertTrue(outlines[1].holes.isEmpty())
     }
 }

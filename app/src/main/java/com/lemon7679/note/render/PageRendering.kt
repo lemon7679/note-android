@@ -335,6 +335,21 @@ object NotebookPdfExporter {
             path.close()
             val color = RGBAColor.argb(o.colorHex)
             val group = o.opacity < 1f || o.strokeWidth > 0f
+            if (o.holes.isNotEmpty()) {
+                // Erased areas: clip them out of both the fill and the nib outline stroke.
+                val holes = Path()
+                for (h in o.holes) {
+                    holes.moveTo(h[0], h[1])
+                    var k = 2
+                    while (k + 1 < h.size) {
+                        holes.lineTo(h[k], h[k + 1])
+                        k += 2
+                    }
+                    holes.close()
+                }
+                canvas.save()
+                canvas.clipOutPath(holes)
+            }
             val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
                 this.color = color
                 if (o.multiply && !group) blendMode = BlendMode.MULTIPLY
@@ -358,6 +373,7 @@ object NotebookPdfExporter {
                 canvas.drawPath(path, paint)
             }
             if (group) canvas.restore()
+            if (o.holes.isNotEmpty()) canvas.restore()
         }
     }
 }
