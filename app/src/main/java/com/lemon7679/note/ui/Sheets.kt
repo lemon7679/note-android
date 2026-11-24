@@ -268,7 +268,7 @@ private fun LocationRow(app: AppModel, location: LibraryLocation) {
     Row(Modifier.fillMaxWidth().height(60.dp).clip(RoundedCornerShape(NoteTheme.Radius.card)).background(c.background)
         .border(1.dp, c.separator, RoundedCornerShape(NoteTheme.Radius.card)).padding(horizontal = 16.dp),
         verticalAlignment = Alignment.CenterVertically) {
-        Icon(if (location.source.accountId != null) Icons.Outlined.Dns else Icons.Outlined.TabletAndroid, null, tint = c.accent)
+        Icon(app.sourceIcon(location.source), null, tint = c.accent)
         Spacer(Modifier.width(12.dp))
         Column {
             Text("저장 위치", style = NoteTheme.Fonts.caption, color = c.textSecondary)
@@ -303,29 +303,52 @@ fun PaperTemplateGrid(selection: PaperTemplate, color: PaperColor, onSelect: (Pa
     }
 }
 
-/** Folder picker for "이동". */
+/**
+ * Folder picker for "이동". Lists the item's own storage; a file on this device (PDF etc.)
+ * can also go to a folder of any connected NAS. Each storage's root row carries that
+ * storage's icon (this device: tablet, NAS: its kind).
+ */
 @Composable
 fun MoveSheet(app: AppModel, source: LibrarySource, item: LibraryEntry, onDismiss: () -> Unit) {
     val c = NoteTheme.colors
-    val folders = remember(item) {
-        listOf("/") + app.library(source).allFolders().filter { !RemotePath.isAncestor(item.path, it) }
+    val here = LibraryLocation(source, RemotePath.parent(item.path))
+    val destinations = remember(item, app.accounts) {
+        val own = listOf(LibraryLocation(source, "/")) + app.library(source).allFolders()
+            .filter { !RemotePath.isAncestor(item.path, it) }.map { LibraryLocation(source, it) }
+        val others = if (app.canMoveAcross(item, source)) {
+            app.accounts.flatMap { account ->
+                val nas = LibrarySource(account.id)
+                listOf(LibraryLocation(nas, "/")) + app.library(nas).allFolders().map { LibraryLocation(nas, it) }
+            }
+        } else emptyList()
+        own + others
     }
-    var target by remember { mutableStateOf(RemotePath.parent(item.path)) }
+    val firstNas = destinations.firstOrNull { it.source != source }
+    var target by remember { mutableStateOf(here) }
     NoteSheet("‘${item.displayName}’ 이동", onDismiss, maxWidth = 520.dp, confirm = "이동",
-        confirmEnabled = target != RemotePath.parent(item.path), onConfirm = {
-            app.move(LibraryRef(source, item.path), target)
+        confirmEnabled = target != here, onConfirm = {
+            app.moveAcross(LibraryRef(source, item.path), target)
             onDismiss()
         }) {
         LazyColumn(Modifier.fillMaxWidth().heightIn(max = 560.dp)) {
-            items(folders) { folder ->
-                val selected = folder == target
-                Row(Modifier.fillMaxWidth().clickable { target = folder }.background(if (selected) c.accentSoft else Color.Transparent)
-                    .padding(start = (16 + 18 * RemotePath.depth(folder)).dp, end = 16.dp).height(48.dp),
-                    verticalAlignment = Alignment.CenterVertically) {
-                    Icon(if (folder == "/") Icons.Outlined.TabletAndroid else Icons.Outlined.Folder, null, tint = c.accent)
-                    Spacer(Modifier.width(12.dp))
-                    Text(if (folder == "/") app.displayName(source) else RemotePath.name(folder), color = c.textPrimary,
-                        fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal)
+            items(destinations, key = { it.source.id + ":" + it.folder }) { location ->
+                val selected = location == target
+                val isRoot = location.folder == "/"
+                Column {
+                    if (location == firstNas) {
+                        Hairline()
+                        Text("NAS로 옮기기 · 다음 동기화 때 올라갑니다", style = NoteTheme.Fonts.caption, color = c.textSecondary,
+                            modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 4.dp))
+                    }
+                    Row(Modifier.fillMaxWidth().clickable { target = location }.background(if (selected) c.accentSoft else Color.Transparent)
+                        .padding(start = (16 + 18 * RemotePath.depth(location.folder)).dp, end = 16.dp).height(48.dp),
+                        verticalAlignment = Alignment.CenterVertically) {
+                        Icon(if (isRoot) app.sourceIcon(location.source) else Icons.Outlined.Folder, null, tint = c.accent)
+                        Spacer(Modifier.width(12.dp))
+                        Text(if (isRoot) app.displayName(location.source) else RemotePath.name(location.folder), color = c.textPrimary,
+                            fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+                            maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
                 }
             }
         }

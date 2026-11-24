@@ -35,6 +35,7 @@ import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.Dns
 import androidx.compose.material.icons.outlined.ErrorOutline
 import androidx.compose.material.icons.outlined.Folder
+import androidx.compose.material.icons.outlined.FolderShared
 import androidx.compose.material.icons.outlined.Language
 import androidx.compose.material.icons.outlined.Schedule
 import androidx.compose.material.icons.outlined.Settings
@@ -100,8 +101,12 @@ val NasKind.icon: ImageVector
     get() = when (this) {
         NasKind.SYNOLOGY -> Icons.Outlined.Dns
         NasKind.WEBDAV -> Icons.Outlined.Language
-        NasKind.FILES_FOLDER -> Icons.Outlined.Folder
+        NasKind.FILES_FOLDER -> Icons.Outlined.FolderShared
     }
+
+/** Icon of a storage: a tablet for this device, the NAS kind's icon for an account. */
+fun AppModel.sourceIcon(source: LibrarySource): ImageVector =
+    source.accountId?.let { account(it)?.kind?.icon ?: Icons.Outlined.Dns } ?: Icons.Outlined.TabletAndroid
 
 fun newAccountDraft() = NasAccount(name = "", kind = NasKind.SYNOLOGY, syncFolder = "/home/Notes")
 
