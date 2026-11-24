@@ -27,6 +27,7 @@ import com.lemon7679.note.core.PaperStyle
 import com.lemon7679.note.core.PaperTemplate
 import com.lemon7679.note.core.RGBAColor
 import com.lemon7679.note.ink.InkPage
+import com.lemon7679.note.ink.InkSnapshot
 import java.io.Closeable
 import java.io.File
 import kotlin.math.roundToInt
@@ -263,12 +264,20 @@ object PageImageRenderer {
         PaperRenderer.draw(page.paper, page.size, canvas, clip)
     }
 
-    fun image(page: NotebookPage, ink: InkPage?, pdf: PdfHandle?, pkg: NotebookPackage?, pixelWidth: Int): Bitmap {
+    fun image(page: NotebookPage, ink: InkPage?, pdf: PdfHandle?, pkg: NotebookPackage?, pixelWidth: Int): Bitmap =
+        image(page, pdf, pkg, pixelWidth) { bitmap, scale -> ink?.renderOver(bitmap, scale, 0f, 0f) }
+
+    /** Off the main thread: the ink comes from a snapshot (the caller keeps it retained). */
+    fun image(page: NotebookPage, ink: InkSnapshot?, pdf: PdfHandle?, pkg: NotebookPackage?, pixelWidth: Int): Bitmap =
+        image(page, pdf, pkg, pixelWidth) { bitmap, scale -> ink?.renderOver(bitmap, scale, 0f, 0f) }
+
+    private inline fun image(page: NotebookPage, pdf: PdfHandle?, pkg: NotebookPackage?, pixelWidth: Int,
+                             drawInk: (Bitmap, Float) -> Unit): Bitmap {
         val scale = pixelWidth / page.size.width.toFloat()
         val pixelHeight = maxOf(1, (page.size.height * scale).roundToInt())
         val bitmap = Bitmap.createBitmap(maxOf(1, pixelWidth), pixelHeight, Bitmap.Config.ARGB_8888)
         drawBackground(page, pdf, bitmap, scale, 0f, 0f)
-        ink?.renderOver(bitmap, scale, 0f, 0f)
+        drawInk(bitmap, scale)
         if (page.elements.isNotEmpty()) {
             val canvas = Canvas(bitmap)
             canvas.scale(scale, scale)

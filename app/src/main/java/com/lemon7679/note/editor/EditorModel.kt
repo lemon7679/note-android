@@ -25,19 +25,25 @@ import com.lemon7679.note.ink.BrushKind
 import com.lemon7679.note.ink.EraserMode
 import com.lemon7679.note.ink.InkPage
 import com.lemon7679.note.ink.InkRGBA
+import com.lemon7679.note.ink.InkSnapshot
 import com.lemon7679.note.ink.StabilizerMode
 import com.lemon7679.note.ink.StrokeBuilder
 import com.lemon7679.note.render.NotebookPdfExporter
 import com.lemon7679.note.render.PageImageRenderer
 import com.lemon7679.note.render.PdfHandle
 import com.lemon7679.note.ui.ThumbnailCache
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.time.Instant
+import java.util.concurrent.LinkedBlockingQueue
+import java.util.concurrent.ThreadPoolExecutor
+import java.util.concurrent.TimeUnit
 
 @Serializable
 enum class EditorTool(val label: String) {
@@ -410,52 +416,104 @@ class EditorModel(val app: AppModel, val ref: LibraryRef, file: File) {
 
     // Thumbnails
 
-    fun thumbnail(page: NotebookPage, width: Int = 180): Bitmap? {
+    /** Page-list thumbnail, rendered off the main thread from an ink snapshot. */
+    suspend fun thumbnail(page: NotebookPage, width: Int = 180): Bitmap? {
         thumbnails[page.id]?.let { return it }
-        val bmp = runCatching { PageImageRenderer.image(page, inkPage(page.id), pdf, pkg, width) }.getOrNull() ?: return null
+        val snapshot = inkPage(page.id).snapshot()
+        val bmp = try {
+            withContext(Dispatchers.Default) { runCatching { PageImageRenderer.image(page, snapshot, pdf, pkg, width) }.getOrNull() }
+        } finally {
+            snapshot.release()
+        } ?: return null
         thumbnails[page.id] = bmp
         return bmp
     }
 
     // Saving
+    //
+    // What to write is captured on the main thread — ink snapshots (pointer copies, no
+    // serialization) and the immutable document — and written on one background writer
+    // thread: serializing big pages, file I/O and the cover thumbnail never stall
+    // drawing. The writer runs saves strictly in capture order, and a synchronous save
+    // (pause, close, export) waits for the ones queued before it, so an older autosave
+    // can never land after newer data.
+
+    private val writer = ThreadPoolExecutor(1, 1, 10, TimeUnit.SECONDS, LinkedBlockingQueue()) { r ->
+        Thread(r, "note-save").apply { isDaemon = true }
+    }.apply { allowCoreThreadTimeOut(true) }   // no idle thread left behind per opened notebook
+
+    private class SaveWork(
+        val ink: List<Pair<String, InkSnapshot>>,
+        val document: NotebookDocument,
+        val cover: Pair<NotebookPage, InkSnapshot>?,
+    ) {
+        fun release() {
+            ink.forEach { it.second.release() }
+            cover?.second?.release()
+        }
+    }
 
     private fun scheduleSave() {
         autosave?.cancel()
         autosave = app.scope.launch {
             delay(2000)
-            save()
+            val work = captureSave() ?: return@launch
+            val error = withContext(Dispatchers.IO) { writer.submit<String?> { write(work) }.get() }
+            if (error != null) saveFailed(work, error)
             thumbnailRevision++
         }
     }
 
     val hasUnsavedChanges: Boolean get() = documentDirty || dirtyInk.isNotEmpty()
 
+    /** Saves now and waits for it (and for any autosave still being written). */
     fun save() {
         autosave?.cancel()
-        if (!hasUnsavedChanges) return
-        try {
-            for (id in dirtyInk) {
-                if (document.pageIndex(id) == null) continue
-                val data = pages[id]?.save() ?: continue
-                pkg.writeInk(data, id)
-            }
-            dirtyInk.clear()
-            document = document.copy(modified = Instant.now(), lastPageIndex = currentPageIndex)
-            pkg.write(document)
-            pkg.pruneInk(document)
-            documentDirty = false
-            writeCoverThumbnail()
-        } catch (e: Exception) {
-            lastError = "저장하지 못했습니다. ${e.message ?: ""}"
+        val work = captureSave() ?: run {
+            // Nothing new, but an autosave may still be writing: wait for it.
+            runCatching { writer.submit(Runnable {}).get() }
+            return
         }
+        val error = runCatching { writer.submit<String?> { write(work) }.get() }.getOrElse { it.message ?: "" }
+        if (error != null) saveFailed(work, error)
     }
 
-    private fun writeCoverThumbnail() {
-        val first = document.pages.firstOrNull() ?: return
+    private fun captureSave(): SaveWork? {
+        if (!hasUnsavedChanges) return null
+        val ink = dirtyInk.filter { document.pageIndex(it) != null }.mapNotNull { id -> pages[id]?.let { id to it.snapshot() } }
+        dirtyInk.clear()
+        document = document.copy(modified = Instant.now(), lastPageIndex = currentPageIndex)
+        documentDirty = false
+        val cover = document.pages.firstOrNull()?.let { it to inkPage(it.id).snapshot() }
+        return SaveWork(ink, document, cover)
+    }
+
+    /** On the writer thread. Returns an error message, or null. */
+    private fun write(work: SaveWork): String? = try {
+        for ((id, snapshot) in work.ink) snapshot.save()?.let { pkg.writeInk(it, id) }
+        pkg.write(work.document)
+        pkg.pruneInk(work.document)
+        work.cover?.let { (page, snapshot) -> writeCoverThumbnail(page, snapshot) }
+        null
+    } catch (e: Exception) {
+        "저장하지 못했습니다. ${e.message ?: ""}"
+    } finally {
+        work.release()
+    }
+
+    private fun saveFailed(work: SaveWork, error: String) {
+        lastError = error
+        // Try again with the next save.
+        dirtyInk += work.ink.map { it.first }
+        documentDirty = true
+    }
+
+    private fun writeCoverThumbnail(page: NotebookPage, ink: InkSnapshot) {
         runCatching {
-            val bmp = PageImageRenderer.image(first, inkPage(first.id), pdf, pkg, 360)
+            val bmp = PageImageRenderer.image(page, ink, pdf, pkg, 360)
             val out = ByteArrayOutputStream()
             bmp.compress(Bitmap.CompressFormat.PNG, 100, out)
+            bmp.recycle()
             pkg.writeThumbnail(out.toByteArray())
             ThumbnailCache.invalidate(pkg.dir)
         }

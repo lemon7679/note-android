@@ -1,6 +1,7 @@
 // JNI face of note-core's InkEngine C API (ink_c.h) for com.lemon7679.note.ink.InkNative.
-// Kotlin wraps these in StrokeBuilder / InkPage; nothing else calls them.
-// Engine objects are not thread-safe: the app uses them from the main thread.
+// Kotlin wraps these in StrokeBuilder / InkPage / InkSnapshot; nothing else calls them.
+// Builders and editors are not thread-safe: the app uses them from the main thread.
+// Snapshots are immutable and may be rendered / saved from any thread.
 
 #include <android/bitmap.h>
 #include <jni.h>
@@ -313,6 +314,30 @@ JNIEXPORT jstring FN(editorExportSvg)(JNIEnv* env, jclass, jlong e) {
   if (!svg) return env->NewStringUTF("");
   jstring out = env->NewStringUTF(svg);
   ink_free(svg);
+  return out;
+}
+
+// ---------------------------------------------------------------- snapshots
+
+JNIEXPORT jlong FN(editorSnapshot)(JNIEnv*, jclass, jlong e) {
+  return reinterpret_cast<jlong>(ink_editor_snapshot(E(e)));
+}
+JNIEXPORT void FN(snapshotRelease)(JNIEnv*, jclass, jlong s) {
+  ink_snapshot_release(reinterpret_cast<InkSnapshot*>(s));
+}
+JNIEXPORT void FN(snapshotRenderOver)(JNIEnv* env, jclass, jlong s, jobject bitmap, jfloat scale, jfloat ox,
+                                      jfloat oy) {
+  LockedBitmap bm(env, bitmap);
+  if (!bm) return;
+  ink_snapshot_render_over_rgba(reinterpret_cast<const InkSnapshot*>(s), bm.data(), static_cast<int>(bm.info.width),
+                                static_cast<int>(bm.info.height), bm.info.stride, scale, ox, oy);
+}
+JNIEXPORT jbyteArray FN(snapshotSave)(JNIEnv* env, jclass, jlong s) {
+  size_t size = 0;
+  uint8_t* data = ink_snapshot_save(reinterpret_cast<const InkSnapshot*>(s), &size);
+  if (!data) return nullptr;
+  jbyteArray out = toJava(env, data, size);
+  ink_free(data);
   return out;
 }
 

@@ -26,19 +26,24 @@ import com.lemon7679.note.core.PageElement
 import com.lemon7679.note.ink.InkAffine
 import com.lemon7679.note.ink.InkPage
 import com.lemon7679.note.ink.InkRGBA
+import com.lemon7679.note.ink.InkSnapshot
 import com.lemon7679.note.ink.PenSample
 import com.lemon7679.note.ink.SnappedShape
 import com.lemon7679.note.ink.StrokeBuilder
+import com.lemon7679.note.render.BitmapPool
 import com.lemon7679.note.render.ElementDrawing
 import com.lemon7679.note.render.PageImageRenderer
 import com.lemon7679.note.render.PaperRenderer
 import com.lemon7679.note.render.PdfSupport
+import com.lemon7679.note.render.TileWorkers
 import kotlin.math.abs
 import kotlin.math.ceil
 import kotlin.math.floor
 import kotlin.math.hypot
+import kotlin.math.ln
 import kotlin.math.max
 import kotlin.math.min
+import kotlin.math.pow
 import kotlin.math.roundToInt
 
 /** Selected strokes on one page. */
@@ -60,12 +65,18 @@ interface CanvasHost {
  * note-core's CPU rasterizer in 512-px tiles — the Android port of the iPad
  * `CanvasViewController` + `PageView`.
  *
- * - Each page: a low-resolution preview under 512-px tiles rendered at the current
- *   zoom (paper/PDF + ink via `InkPage.renderOver`). Old tiles stay visible after a
- *   zoom until the sharper set is ready.
+ * - Each page: a low-resolution preview under 512-px tiles (paper/PDF + ink).
+ * - Tiles are rendered on background threads ([TileWorkers]) from immutable ink
+ *   snapshots, nearest to the middle of the screen first; the UI thread only swaps
+ *   finished bitmaps in, so scrolling and pinching never wait for ink. A tile keeps
+ *   showing its previous bitmap until the new one arrives.
+ * - Zoom is rendered at discrete levels (steps of 2^(1/3), rounded up, so tiles are
+ *   never magnified): small pinch adjustments reuse the current tiles, and after a
+ *   real zoom change the old tiles stay visible, scaled, until the sharper set is ready.
  * - While a stroke is drawn, only the overlay tiles it touches are redrawn each frame
- *   (`StrokeBuilder.renderOver`); on pen-up the affected ink tiles are re-rendered in
- *   the same frame and the overlay is dropped, so nothing flickers.
+ *   (`StrokeBuilder.renderOver`); on pen-up and while erasing, only the damaged part of
+ *   the affected tiles is re-rendered in the same frame (small, fast), and the overlay
+ *   is dropped afterwards, so nothing flickers.
  * - Stylus draws; fingers scroll/zoom (or draw, in finger mode, with two-finger scrolling).
  *   A finger resting while drawing makes perfect shapes. The stylus eraser end or
  *   side button erases.
@@ -76,6 +87,12 @@ class CanvasView(context: Context, private val model: EditorModel, private val h
 
     companion object {
         const val TILE = 512
+
+        /** Discrete render zoom for `zoom`: the next level up in steps of 2^(1/3). */
+        fun renderLevel(zoom: Float): Float {
+            val steps = kotlin.math.ceil(3.0 * ln(zoom.toDouble()) / ln(2.0) - 0.05)
+            return 2.0.pow(steps / 3.0).toFloat().coerceIn(0.5f, 5f)
+        }
     }
 
     private val density = resources.displayMetrics.density
@@ -96,7 +113,8 @@ class CanvasView(context: Context, private val model: EditorModel, private val h
 
     private val states = HashMap<String, PageState>()
     private val builder = StrokeBuilder(com.lemon7679.note.ink.BrushKind.BALLPOINT).apply { setBuiltinPrediction(true) }
-    private val pool = ArrayList<Bitmap>()
+    private val pool = BitmapPool(TILE)
+    private val workers = TileWorkers()
 
     // Interaction
     private enum class Mode { IDLE, DRAWING, ERASING, LASSO, MOVING, SCALING, LASER, TAP, ELEMENT, GESTURE }
@@ -144,6 +162,7 @@ class CanvasView(context: Context, private val model: EditorModel, private val h
     private val touchSlop = ViewConfiguration.get(context).scaledTouchSlop
     private var frameScheduled = false
 
+    private val previewWake = Runnable { scheduleFrame() }
     private val tilePaint = Paint(Paint.FILTER_BITMAP_FLAG)
     private val multiplyPaint = Paint(Paint.FILTER_BITMAP_FLAG).apply { blendMode = BlendMode.MULTIPLY }
     private val clearPaint = Paint().apply { xfermode = PorterDuffXfermode(PorterDuff.Mode.SRC) }
@@ -167,7 +186,19 @@ class CanvasView(context: Context, private val model: EditorModel, private val h
 
     // ------------------------------------------------------------------ page state
 
-    private inner class Tile(val key: Long, var bitmap: Bitmap?, var valid: Boolean = false, var background: Bitmap? = null)
+    /**
+     * One 512-px tile. `bitmap` may lag behind (`valid` false) while a newer render is
+     * on its way; it keeps being drawn meanwhile. `version` is bumped by every change
+     * under the tile, so a worker's result for an older version is never installed
+     * over newer content.
+     */
+    private inner class Tile(val key: Long) {
+        var bitmap: Bitmap? = null
+        var valid = false
+        var version = 0
+        var requested = -1       // version of the job in flight, -1 none
+        var background: Bitmap? = null   // PDF tiles: the page image under the ink (never mutated)
+    }
 
     private inner class PageState(var page: NotebookPage, val ink: InkPage) {
         var scale = 0f
@@ -178,6 +209,8 @@ class CanvasView(context: Context, private val model: EditorModel, private val h
         var overlayMultiply = false
         var preview: Bitmap? = null
         var previewDirtyAt = 0L
+        var previewRequested = false
+        var disposed = false
         val pdfIndex get() = page.background.pdfPageIndex
 
         fun pixelW() = ceil(page.size.width * scale).toInt()
@@ -206,9 +239,11 @@ class CanvasView(context: Context, private val model: EditorModel, private val h
 
         fun changeScale(s: Float) {
             if (abs(s - scale) < 0.0001f) return
+            // Queued renders at the old scale are useless now.
+            workers.cancel(this)
             // Keep the old tiles drawn underneath until the new set covers the screen.
             stale?.values?.forEach { recycle(it) }
-            stale = if (scale > 0) tiles else null
+            stale = if (scale > 0) tiles.also { m -> m.values.removeAll { it.bitmap == null } } else null
             staleScale = scale
             tiles = HashMap()
             scale = s
@@ -218,9 +253,16 @@ class CanvasView(context: Context, private val model: EditorModel, private val h
         /** Marks tiles touching `rect` (page units) for re-rendering. */
         fun invalidate(rect: RectF?, background: Boolean = false) {
             val r = rect ?: RectF(0f, 0f, page.size.width.toFloat(), page.size.height.toFloat())
-            for (k in keys(r)) tiles[k]?.let { t -> t.valid = false; if (background) t.background = null }
+            for (k in keys(r)) tiles[k]?.let { t ->
+                t.valid = false
+                t.version++
+                if (background) t.background = null
+            }
             stale?.let { s -> for (k in keys(r, staleScale, ceil(page.size.width * staleScale).toInt(), ceil(page.size.height * staleScale).toInt())) s.remove(k)?.let { recycle(it) } }
             previewDirtyAt = SystemClock.uptimeMillis()
+            // Refresh the low-resolution preview once the page has been quiet for a moment.
+            removeCallbacks(previewWake)
+            postDelayed(previewWake, 650)
         }
 
         fun renderTile(t: Tile) {
@@ -248,6 +290,24 @@ class CanvasView(context: Context, private val model: EditorModel, private val h
             t.valid = true
         }
 
+        /** Queues a background render of `t` at the current scale and ink version. */
+        fun request(t: Tile, snapshot: InkSnapshot, priority: Float) {
+            val r = tileRect(t.key)
+            if (r.width() <= 0 || r.height() <= 0) {
+                t.valid = true
+                return
+            }
+            t.requested = t.version
+            workers.submit(TileJob(this, t, t.version, scale, r, snapshot.retain(), t.background, priority))
+        }
+
+        fun requestPreview(snapshot: InkSnapshot) {
+            previewRequested = true
+            previewDirtyAt = 0
+            val w = min(480, max(64, (page.size.width * layoutScale * 0.5f).toInt()))
+            workers.submit(PreviewJob(this, page.copy(elements = emptyList()), w, snapshot.retain()))
+        }
+
         /** Redraws only `pageRect` (page units) of an already rendered tile. */
         fun renderTilePart(t: Tile, pageRect: RectF) {
             val bmp = t.bitmap ?: return renderTile(t)
@@ -273,23 +333,136 @@ class CanvasView(context: Context, private val model: EditorModel, private val h
             t.valid = true
         }
 
-        fun renderPreview() {
-            val w = min(480, max(64, (page.size.width * layoutScale * 0.5f).toInt()))
-            preview?.recycle()
-            preview = PageImageRenderer.image(page.copy(elements = emptyList()), ink, model.pdf, null, w)
-            previewDirtyAt = 0
-        }
-
         fun clearOverlay() {
             overlay.values.forEach { release(it) }
             overlay.clear()
         }
 
         fun dispose() {
+            disposed = true
+            workers.cancel(this)
             tiles.values.forEach { recycle(it) }
             stale?.values?.forEach { recycle(it) }
             clearOverlay()
             preview?.recycle()
+            preview = null
+        }
+    }
+
+    /** Renders one tile on a worker: background (paper / PDF) + ink from the snapshot. */
+    private inner class TileJob(
+        val s: PageState, val t: Tile, val version: Int, val scale: Float, val r: Rect,
+        val snapshot: InkSnapshot, val background: Bitmap?, priority: Float,
+    ) : TileWorkers.Job(s, priority) {
+        private val page = s.page
+        private val pdf = model.pdf
+
+        override fun render(): () -> Unit {
+            var bmp: Bitmap? = null
+            try {
+                if (s.disposed) return { if (t.requested == version) t.requested = -1 }
+                val out = pool.obtain(r.width(), r.height())
+                bmp = out
+                val pdfIndex = page.background.pdfPageIndex
+                var newBackground: Bitmap? = null
+                if (pdfIndex != null && pdf != null) {
+                    val bg = background ?: Bitmap.createBitmap(r.width(), r.height(), Bitmap.Config.ARGB_8888).also { b ->
+                        b.eraseColor(Color.WHITE)
+                        PdfSupport.draw(pdf, pdfIndex, page.size, b, scale, r.left.toFloat(), r.top.toFloat())
+                        newBackground = b
+                    }
+                    Canvas(out).drawBitmap(bg, 0f, 0f, Paint().apply { xfermode = PorterDuffXfermode(PorterDuff.Mode.SRC) })
+                } else {
+                    PageImageRenderer.drawBackground(page, null, out, scale, r.left.toFloat(), r.top.toFloat())
+                }
+                snapshot.renderOver(out, scale, -r.left.toFloat(), -r.top.toFloat())
+                val bg = newBackground
+                return { deliverTile(this, out, bg) }
+            } catch (e: Throwable) {
+                bmp?.let { pool.release(it) }
+                throw e
+            } finally {
+                snapshot.release()
+            }
+        }
+
+        override fun dropped() {
+            snapshot.release()
+            if (t.requested == version) t.requested = -1
+        }
+
+        override fun failed(error: Throwable) {
+            // render() already released the snapshot; the tile is requested again later.
+            if (t.requested == version) t.requested = -1
+            android.util.Log.w("CanvasView", "tile render failed", error)
+        }
+    }
+
+    private inner class PreviewJob(val s: PageState, val page: NotebookPage, val width: Int, val snapshot: InkSnapshot) :
+        TileWorkers.Job(s, Float.MAX_VALUE / 2) {
+        private val pdf = model.pdf
+
+        override fun render(): () -> Unit = try {
+            val bmp = PageImageRenderer.image(page, snapshot, pdf, null, width)
+            ({ deliverPreview(s, bmp) })
+        } finally {
+            snapshot.release()
+        }
+
+        override fun dropped() {
+            snapshot.release()
+            s.previewRequested = false
+        }
+
+        override fun failed(error: Throwable) {
+            s.previewRequested = false
+        }
+    }
+
+    private fun deliverTile(job: TileJob, bmp: Bitmap, background: Bitmap?) {
+        val s = job.s
+        val t = job.t
+        if (t.requested == job.version) t.requested = -1
+        val current = !disposed && !s.disposed && states[s.page.id] === s && s.tiles[t.key] === t && abs(s.scale - job.scale) < 0.0001f
+        if (!current) {
+            pool.release(bmp)
+            return
+        }
+        if (background != null && t.background == null && t.version == job.version) t.background = background
+        if (t.version == job.version || t.bitmap == null) {
+            // An older version still beats an empty tile; it stays invalid and is requested again.
+            t.bitmap?.let { pool.release(it) }
+            t.bitmap = bmp
+            t.valid = t.version == job.version
+            if (s.stale != null) dropCoveredStale(s)
+            invalidate()
+        } else {
+            pool.release(bmp)
+        }
+        scheduleFrame()
+    }
+
+    private fun deliverPreview(s: PageState, bmp: Bitmap) {
+        s.previewRequested = false
+        if (disposed || s.disposed || states[s.page.id] !== s) {
+            bmp.recycle()
+            return
+        }
+        s.preview?.recycle()
+        s.preview = bmp
+        invalidate()
+    }
+
+    /** Drops the previous zoom level's tiles once the new ones cover the visible part of the page. */
+    private fun dropCoveredStale(s: PageState) {
+        val frame = frameOf(s.page.id) ?: return
+        val vis = RectF(frame).apply { if (!intersect(visibleContent())) setEmpty() }
+        if (vis.isEmpty) return
+        val pageRect = RectF((vis.left - frame.left) / layoutScale, (vis.top - frame.top) / layoutScale,
+            (vis.right - frame.left) / layoutScale, (vis.bottom - frame.top) / layoutScale)
+        if (s.keys(pageRect).all { s.tiles[it]?.bitmap != null }) {
+            s.stale?.values?.forEach { recycle(it) }
+            s.stale = null
         }
     }
 
@@ -309,19 +482,14 @@ class CanvasView(context: Context, private val model: EditorModel, private val h
         }
     }
 
-    private fun obtain(w: Int, h: Int): Bitmap {
-        val i = pool.indexOfFirst { it.width == w && it.height == h }
-        return if (i >= 0) pool.removeAt(i) else Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
-    }
+    private fun obtain(w: Int, h: Int): Bitmap = pool.obtain(w, h)
 
-    private fun release(b: Bitmap) {
-        if (pool.size < 24 && b.width == TILE && b.height == TILE) pool += b else b.recycle()
-    }
+    private fun release(b: Bitmap) = pool.release(b)
 
     private fun recycle(t: Tile) {
         t.bitmap?.let { release(it) }
         t.bitmap = null
-        t.background?.recycle()
+        // A worker may still be reading the PDF background: leave it to the GC.
         t.background = null
     }
 
@@ -331,9 +499,10 @@ class CanvasView(context: Context, private val model: EditorModel, private val h
         if (disposed) return
         disposed = true
         Choreographer.getInstance().removeFrameCallback(this)
+        removeCallbacks(previewWake)
+        workers.shutdown()
         states.values.forEach { it.dispose() }
         states.clear()
-        pool.forEach { it.recycle() }
         pool.clear()
         scratch?.recycle()
         scratch = null
@@ -458,7 +627,7 @@ class CanvasView(context: Context, private val model: EditorModel, private val h
                 for (t in stale.values) drawTile(canvas, vr, t, s.staleScale, ceil(page.size.width * s.staleScale).toInt(),
                     ceil(page.size.height * s.staleScale).toInt(), k)
             }
-            for (t in s.tiles.values) if (t.valid) drawTile(canvas, vr, t, s.scale, s.pixelW(), s.pixelH(), k)
+            for (t in s.tiles.values) drawTile(canvas, vr, t, s.scale, s.pixelW(), s.pixelH(), k)
             if (s.overlay.isNotEmpty()) {
                 val p = if (s.overlayMultiply) multiplyPaint else tilePaint
                 for ((key, bmp) in s.overlay) {
@@ -627,41 +796,42 @@ class CanvasView(context: Context, private val model: EditorModel, private val h
             updateLive(pv, builder.updateGeometry(pv.scale))
             more = true
         }
-        // Background tile work, nearest pages first, within a frame budget.
-        val budgetNs = if (mode == Mode.DRAWING) 2_000_000L else 7_000_000L
-        val deadline = System.nanoTime() + budgetNs
+        // Ask the workers for missing / outdated tiles, nearest to the middle of the screen first.
         val visible = visibleContent()
+        val midX = visible.centerX()
         val midY = visible.centerY()
-        val ordered = states.values.mapNotNull { s -> frameOf(s.page.id)?.let { s to it } }.sortedBy { abs(it.second.centerY() - midY) }
-        var pending = false
-        for ((s, frame) in ordered) {
+        for (s in states.values.toList()) {
+            val frame = frameOf(s.page.id) ?: continue
             val vis = RectF(frame).apply { if (!intersect(visible)) setEmpty() }
             val pageRect = if (vis.isEmpty) null else RectF((vis.left - frame.left) / layoutScale, (vis.top - frame.top) / layoutScale,
                 (vis.right - frame.left) / layoutScale, (vis.bottom - frame.top) / layoutScale)
-            if (s.preview == null || (s.previewDirtyAt > 0 && SystemClock.uptimeMillis() - s.previewDirtyAt > 600 && mode != Mode.DRAWING)) {
-                if (System.nanoTime() < deadline) s.renderPreview() else pending = true
+            var snapshot: InkSnapshot? = null
+            fun snap() = snapshot ?: s.ink.snapshot().also { snapshot = it }
+            if (!s.previewRequested && (s.preview == null ||
+                    (s.previewDirtyAt > 0 && SystemClock.uptimeMillis() - s.previewDirtyAt > 600 && mode != Mode.DRAWING))) {
+                s.requestPreview(snap())
             }
-            if (pageRect == null) continue
-            // Tiles over the visible part plus a margin; drop far-away ones.
-            val margin = RectF(pageRect).apply { inset(-TILE / s.scale, -TILE / s.scale) }
-            val wantedKeys = s.keys(margin).toSet()
-            s.tiles.keys.filter { it !in wantedKeys }.forEach { k -> s.tiles.remove(k)?.let { recycle(it) } }
-            val visibleKeys = s.keys(pageRect)
-            for (k in visibleKeys + (wantedKeys - visibleKeys.toSet())) {
-                val t = s.tiles.getOrPut(k) { Tile(k, null) }
-                if (t.valid) continue
-                if (System.nanoTime() > deadline) {
-                    pending = true
-                    break
+            if (pageRect != null) {
+                // Tiles over the visible part plus a margin; drop far-away ones.
+                val margin = RectF(pageRect).apply { inset(-TILE / s.scale, -TILE / s.scale) }
+                val wantedKeys = s.keys(margin).toSet()
+                s.tiles.keys.filter { it !in wantedKeys }.forEach { k -> s.tiles.remove(k)?.let { recycle(it) } }
+                val visibleKeys = s.keys(pageRect).toHashSet()
+                for (k in wantedKeys) {
+                    val t = s.tiles.getOrPut(k) { Tile(k) }
+                    if (t.valid || t.requested == t.version) continue
+                    // Priority: distance (view px) from the middle of the screen; off-screen margin tiles last.
+                    val r = s.tileRect(k)
+                    val cx = (frame.left + (r.exactCenterX() / s.scale) * layoutScale - midX) * zoom
+                    val cy = (frame.top + (r.exactCenterY() / s.scale) * layoutScale - midY) * zoom
+                    val priority = hypot(cx, cy) + if (k in visibleKeys) 0f else 1e6f
+                    s.request(t, snap(), priority)
                 }
-                s.renderTile(t)
+                if (s.stale != null) dropCoveredStale(s)
             }
-            if (s.stale != null && visibleKeys.all { s.tiles[it]?.valid == true }) {
-                s.stale?.values?.forEach { recycle(it) }
-                s.stale = null
-            }
+            snapshot?.release()
         }
-        if (pending || more || laser.isNotEmpty() || highlight != null && SystemClock.uptimeMillis() < highlightUntil) scheduleFrame()
+        if (more || laser.isNotEmpty() || highlight != null && SystemClock.uptimeMillis() < highlightUntil) scheduleFrame()
         else invalidate()
     }
 
@@ -676,8 +846,14 @@ class CanvasView(context: Context, private val model: EditorModel, private val h
         }
     }
 
-    /** Re-renders the ink tiles under `rect` right away (pen-up, erase), then the rest lazily. */
-    private fun refreshNow(s: PageState, rect: RectF?) {
+    /**
+     * Re-renders the ink under `rect` (page units) after an edit. Small damage (a stroke,
+     * an eraser frame) is redrawn right here, part of a tile at a time, so the change shows
+     * in the same frame. Large damage (undo of a big erase, a page-wide recolor) would
+     * stall the UI thread: unless `immediate`, it goes to the tile workers and the old
+     * pixels stay up until the new tiles arrive.
+     */
+    private fun refreshNow(s: PageState, rect: RectF?, immediate: Boolean = false) {
         // Tiles that were fully up to date only need `rect` redrawn; others are redrawn whole.
         val upToDate = rect?.let { r -> s.keys(r).filter { s.tiles[it]?.valid == true }.toHashSet() } ?: emptySet<Long>()
         s.invalidate(rect)
@@ -689,8 +865,23 @@ class CanvasView(context: Context, private val model: EditorModel, private val h
             (vis.right - frame.left) / layoutScale, (vis.bottom - frame.top) / layoutScale)
         val area = rect?.let { RectF(it).apply { if (!intersect(pageRect)) setEmpty() } } ?: pageRect
         if (area.isEmpty) return
+        if (!immediate) {
+            // Pixels this would redraw synchronously: the damaged part of up-to-date tiles, whole other tiles.
+            var cost = 0f
+            for (k in s.keys(area)) {
+                val r = s.tileRect(k)
+                cost += if (k in upToDate) {
+                    val px = RectF(area.left * s.scale, area.top * s.scale, area.right * s.scale, area.bottom * s.scale)
+                    if (px.intersect(r.left.toFloat(), r.top.toFloat(), r.right.toFloat(), r.bottom.toFloat())) px.width() * px.height() else 0f
+                } else (r.width() * r.height()).toFloat()
+            }
+            if (cost > 2f * TILE * TILE) {
+                scheduleFrame()
+                return
+            }
+        }
         for (k in s.keys(area)) {
-            val t = s.tiles.getOrPut(k) { Tile(k, null) }
+            val t = s.tiles.getOrPut(k) { Tile(k) }
             // A tile that was valid only needs the damaged part redrawn; a new one is drawn whole.
             if (rect != null && k in upToDate) s.renderTilePart(t, rect) else s.renderTile(t)
         }
@@ -1033,7 +1224,7 @@ class CanvasView(context: Context, private val model: EditorModel, private val h
                     builder.end()
                     if (!scratchOut(s)) {
                         val strokeId = s.ink.commit(builder)
-                        refreshNow(s, s.ink.takeDirty())   // new stroke into the tiles first…
+                        refreshNow(s, s.ink.takeDirty(), immediate = true)   // new stroke into the tiles first…
                         s.clearOverlay()                    // …then drop the overlay: no flicker
                         if (strokeId != 0L) model.noteInkEdit(s.page.id)
                     }
@@ -1098,8 +1289,9 @@ class CanvasView(context: Context, private val model: EditorModel, private val h
 
     private fun endGesture(vx: Float, vy: Float) {
         // Fling, then render tiles at the new zoom.
-        if (abs(zoom - renderZoom) > 0.001f) {
-            renderZoom = zoom
+        val level = renderLevel(zoom)
+        if (abs(level - renderZoom) > 0.001f) {
+            renderZoom = level
             updateVisible()
             selection?.let { host.selectionChanged(selectionAnchor(it)) }
         }
@@ -1130,7 +1322,7 @@ class CanvasView(context: Context, private val model: EditorModel, private val h
         if (!s.ink.delete(ids)) return false
         builder.cancel()
         val dirty = s.ink.takeDirty()?.apply { covered?.let { union(it) } } ?: covered
-        refreshNow(s, dirty?.apply { inset(-4f, -4f) })
+        refreshNow(s, dirty?.apply { inset(-4f, -4f) }, immediate = true)
         s.clearOverlay()
         model.noteInkEdit(s.page.id)
         performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)

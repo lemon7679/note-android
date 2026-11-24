@@ -2,10 +2,13 @@ package com.lemon7679.note.ink
 
 import android.graphics.Bitmap
 import android.graphics.RectF
+import java.util.concurrent.atomic.AtomicInteger
 
 // Kotlin face of note-core's InkEngine C API (ink_c.h) through JNI (src/main/cpp/ink_jni.cpp).
-// Mirrors note-ipad's InkBridge: the app talks only to StrokeBuilder / InkPage.
-// Engine objects are not thread-safe: use them from the main thread.
+// Mirrors note-ipad's InkBridge: the app talks only to StrokeBuilder / InkPage / InkSnapshot.
+// StrokeBuilder and InkPage are not thread-safe: use them from the main thread. An
+// InkSnapshot is an immutable copy of a page's ink that may be rendered and saved on
+// any thread (tile workers, autosave) while the page keeps changing.
 
 typealias StrokeId = Long
 
@@ -162,12 +165,64 @@ class StrokeBuilder(kind: BrushKind) {
         InkNative.builderRenderOver(handle, bitmap, scale, offsetX, offsetY)
 }
 
+/**
+ * Immutable view of a page's ink at one moment (strokes are shared, not copied).
+ * Reference counted: whoever receives one from [InkPage.snapshot] must [release] it,
+ * from any thread. Rendering and saving are thread-safe.
+ */
+class InkSnapshot internal constructor(private val handle: Long) {
+    private val refs = AtomicInteger(1)
+
+    /** Another owner (e.g. a tile job on a worker thread). */
+    fun retain(): InkSnapshot {
+        check(refs.getAndIncrement() > 0) { "snapshot already released" }
+        return this
+    }
+
+    fun release() {
+        if (refs.decrementAndGet() == 0) InkNative.snapshotRelease(handle)
+    }
+
+    /** Same pixels as [InkPage.renderOver] at the time of the snapshot. */
+    fun renderOver(bitmap: Bitmap, scale: Float, offsetX: Float, offsetY: Float) =
+        InkNative.snapshotRenderOver(handle, bitmap, scale, offsetX, offsetY)
+
+    /** Same bytes as [InkPage.save] at the time of the snapshot. */
+    fun save(): ByteArray? = InkNative.snapshotSave(handle)
+}
+
 /** One page of ink with its own undo history. */
 class InkPage(width: Float, height: Float) {
     internal val handle: Long = InkNative.editorCreate(width, height)
     private val rect = FloatArray(4)
+    private var snapshot: InkSnapshot? = null
 
-    fun dispose() = InkNative.editorDestroy(handle)
+    /** Bumped by every change to the ink (or to the hidden set): render results older than this are stale. */
+    var version = 0L
+        private set
+
+    private fun changed() {
+        version++
+        snapshot?.release()
+        snapshot = null
+    }
+
+    private fun <T> edit(result: T): T {
+        changed()
+        return result
+    }
+
+    fun dispose() {
+        snapshot?.release()
+        snapshot = null
+        InkNative.editorDestroy(handle)
+    }
+
+    /** The current ink as an immutable snapshot (shared until the next change). Release it when done. */
+    fun snapshot(): InkSnapshot {
+        val s = snapshot ?: InkSnapshot(InkNative.editorSnapshot(handle)).also { snapshot = it }
+        return s.retain()
+    }
 
     val pageWidth: Float get() = InkNative.editorPageWidth(handle)
     val pageHeight: Float get() = InkNative.editorPageHeight(handle)
@@ -176,17 +231,18 @@ class InkPage(width: Float, height: Float) {
     val canRedo: Boolean get() = InkNative.editorCanRedo(handle)
 
     /** Adds the builder's finished stroke (after `end()`); 0 on failure. */
-    fun commit(builder: StrokeBuilder): StrokeId = InkNative.editorCommit(handle, builder.handle)
-    fun undo(): Boolean = InkNative.editorUndo(handle)
-    fun redo(): Boolean = InkNative.editorRedo(handle)
+    fun commit(builder: StrokeBuilder): StrokeId = edit(InkNative.editorCommit(handle, builder.handle))
+    fun undo(): Boolean = edit(InkNative.editorUndo(handle))
+    fun redo(): Boolean = edit(InkNative.editorRedo(handle))
 
     fun eraseBegin(mode: EraserMode, radius: Float, highlighterOnly: Boolean, x: Float, y: Float) {
         val mask = if (highlighterOnly) 1 shl BrushKind.HIGHLIGHTER.raw else 0
         InkNative.editorEraseBegin(handle, mode.raw, radius, mask, x, y)
+        changed()
     }
 
-    fun eraseMove(x: Float, y: Float): Boolean = InkNative.editorEraseMove(handle, x, y)
-    fun eraseEnd() = InkNative.editorEraseEnd(handle)
+    fun eraseMove(x: Float, y: Float): Boolean = InkNative.editorEraseMove(handle, x, y).also { if (it) changed() }
+    fun eraseEnd() = edit(InkNative.editorEraseEnd(handle))
 
     fun selectLasso(points: List<Pair<Float, Float>>): LongArray {
         if (points.size < 3) return LongArray(0)
@@ -196,15 +252,15 @@ class InkPage(width: Float, height: Float) {
     }
 
     fun transform(ids: LongArray, t: InkAffine): Boolean =
-        ids.isNotEmpty() && InkNative.editorTransform(handle, ids, t.a, t.b, t.c, t.d, t.tx, t.ty)
+        ids.isNotEmpty() && edit(InkNative.editorTransform(handle, ids, t.a, t.b, t.c, t.d, t.tx, t.ty))
 
     fun recolor(ids: LongArray, c: InkRGBA): Boolean =
-        ids.isNotEmpty() && InkNative.editorRecolor(handle, ids, c.r, c.g, c.b, c.a)
+        ids.isNotEmpty() && edit(InkNative.editorRecolor(handle, ids, c.r, c.g, c.b, c.a))
 
-    fun delete(ids: LongArray): Boolean = ids.isNotEmpty() && InkNative.editorDelete(handle, ids)
+    fun delete(ids: LongArray): Boolean = ids.isNotEmpty() && edit(InkNative.editorDelete(handle, ids))
 
     fun duplicate(ids: LongArray, dx: Float, dy: Float): LongArray =
-        if (ids.isEmpty()) LongArray(0) else InkNative.editorDuplicate(handle, ids, dx, dy)
+        if (ids.isEmpty()) LongArray(0) else edit(InkNative.editorDuplicate(handle, ids, dx, dy))
 
     /** Ink bounds of the strokes in page units (null if none). */
     fun bounds(ids: LongArray): RectF? =
@@ -215,15 +271,15 @@ class InkPage(width: Float, height: Float) {
 
     /** Pastes clipboard strokes moved by (dx, dy); one undo step. Returns the new ids. */
     fun paste(data: ByteArray, dx: Float, dy: Float): LongArray =
-        if (data.isEmpty()) LongArray(0) else InkNative.editorPaste(handle, data, dx, dy)
+        if (data.isEmpty()) LongArray(0) else edit(InkNative.editorPaste(handle, data, dx, dy))
 
     /** 글씨 다듬기 on written strokes (one undo step). */
     fun correct(ids: LongArray, strength: Float): Boolean =
-        ids.isNotEmpty() && InkNative.editorCorrect(handle, ids, strength)
+        ids.isNotEmpty() && edit(InkNative.editorCorrect(handle, ids, strength))
 
     /** 줄 정렬 (one undo step). */
     fun straighten(ids: LongArray, strength: Float): Boolean =
-        ids.isNotEmpty() && InkNative.editorStraighten(handle, ids, strength)
+        ids.isNotEmpty() && edit(InkNative.editorStraighten(handle, ids, strength))
 
     /** Page area changed since the last call (null if none). */
     fun takeDirty(): RectF? = rectOrNull(InkNative.editorTakeDirty(handle, rect), rect)
@@ -238,10 +294,10 @@ class InkPage(width: Float, height: Float) {
     }
 
     /** Strokes skipped by `renderOver` (while a selection is being dragged). */
-    fun setHidden(ids: LongArray) = InkNative.editorSetHidden(handle, ids)
+    fun setHidden(ids: LongArray) = edit(InkNative.editorSetHidden(handle, ids))
 
     fun save(): ByteArray? = InkNative.editorSave(handle)
-    fun load(data: ByteArray): Boolean = InkNative.editorLoad(handle, data)
+    fun load(data: ByteArray): Boolean = edit(InkNative.editorLoad(handle, data))
 
     /** Vector outlines (SVG) for PDF export. */
     fun exportSvg(): String = InkNative.editorExportSvg(handle)
@@ -316,4 +372,9 @@ object InkNative {
     @JvmStatic external fun editorPageWidth(e: Long): Float
     @JvmStatic external fun editorPageHeight(e: Long): Float
     @JvmStatic external fun editorExportSvg(e: Long): String
+
+    @JvmStatic external fun editorSnapshot(e: Long): Long
+    @JvmStatic external fun snapshotRelease(s: Long)
+    @JvmStatic external fun snapshotRenderOver(s: Long, bitmap: Bitmap, scale: Float, ox: Float, oy: Float)
+    @JvmStatic external fun snapshotSave(s: Long): ByteArray?
 }
