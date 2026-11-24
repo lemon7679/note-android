@@ -586,9 +586,15 @@ class AppModel(val context: Context) {
         }
     }
 
+    /**
+     * Android cuts the network of apps in the background (most aggressively on Samsung), so a sync
+     * started here dies mid-transfer ("Software caused connection abort"). Edits are already saved
+     * locally; they go up on the next start, return to the foreground or edit.
+     */
     fun enteredBackground() {
         periodic?.cancel()
         periodic = null
-        syncAll()
+        scheduled.values.forEach { it.cancel() }
+        scheduled.clear()
     }
 }

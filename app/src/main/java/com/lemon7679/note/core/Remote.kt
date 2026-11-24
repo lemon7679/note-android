@@ -58,8 +58,13 @@ sealed class RemoteException(message: String) : IOException(message) {
         RemoteException("서버 인증서가 이전과 다릅니다. 보안을 위해 연결을 중단했습니다.")
     class TwoFactorRequired : RemoteException("2단계 인증 코드가 필요합니다.")
     class TwoFactorInvalid : RemoteException("2단계 인증 코드가 올바르지 않습니다.")
-    class Synology(val code: Int) : RemoteException(SynologyClient.message(code))
+    class Synology(val code: Int, val detail: String? = null) :
+        RemoteException(SynologyClient.message(code) + (detail?.let { " · $it" } ?: ""))
     class Unsupported(what: String) : RemoteException("지원하지 않는 기능입니다: $what")
+
+    /** Worth retrying right away: dropped connections, server hiccups, a busy NAS. */
+    val isTransient: Boolean
+        get() = this is Network || (this is Server && status >= 500) || (this is Synology && code == 402)
 
     /** Errors that make a sync pointless to continue (every other request would fail too). */
     val stopsSync: Boolean

@@ -14,9 +14,7 @@ import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.longOrNull
 import okhttp3.MediaType.Companion.toMediaType
-import okhttp3.MultipartBody
 import okhttp3.Request
-import okhttp3.RequestBody.Companion.asRequestBody
 import okhttp3.RequestBody.Companion.toRequestBody
 import java.io.File
 import java.time.Instant
@@ -50,7 +48,7 @@ class SynologyClient(
 
     private val entryUrl get() = baseUrl.trimEnd('/') + "/webapi/entry.cgi"
 
-    private class Decoded(val payload: JsonObject, val errorCode: Int?)
+    private class Decoded(val payload: JsonObject, val errorCode: Int?, val detail: String? = null)
 
     /** POSTs an API call and returns the `data` object. Re-logins once when the session expired. */
     private suspend fun call(api: String, version: Int, method: String, params: List<Pair<String, String>> = emptyList(),
@@ -172,34 +170,41 @@ class SynologyClient(
 
     private fun isJson(r: HttpResult) = (r.header("Content-Type") ?: "").lowercase().contains("application/json")
 
+    /** Some DSM builds reject the optional `mtime` field; after the first such refusal it is left out. */
+    @Volatile private var sendMtime = true
+
     override suspend fun upload(from: File, path: String, modified: Instant?): RemoteItem? {
         val target = RemotePath.normalize(path)
-        uploadOnce(from, target, modified, true)
+        val mtime = modified?.takeIf { sendMtime }
+        try {
+            uploadOnce(from, target, mtime, true)
+        } catch (e: RemoteException.Synology) {
+            if (mtime == null || e.code !in MTIME_SUSPECT_ERRORS) throw e
+            uploadOnce(from, target, null, true)   // succeeded without mtime: stop sending it
+            sendMtime = false
+        }
         return stat(target)
     }
 
     private suspend fun uploadOnce(from: File, target: String, modified: Instant?, retrying: Boolean) {
         if (sid == null) login()
-        // multipart/form-data with the file part last (File Station requires that order).
-        val body = MultipartBody.Builder().setType(MultipartBody.FORM)
-            .addFormDataPart("path", RemotePath.parent(target))
-            .addFormDataPart("create_parents", "true")
-            .addFormDataPart("overwrite", "true")
-            .apply { modified?.let { addFormDataPart("mtime", it.toEpochMilli().toString()) } }
-            .addFormDataPart("file", RemotePath.name(target).replace("\"", "%22"),
-                from.asRequestBody("application/octet-stream".toMediaType()))
-            .build()
+        val fields = arrayListOf("path" to RemotePath.parent(target), "create_parents" to "true", "overwrite" to "true")
+        modified?.let { fields += "mtime" to it.toEpochMilli().toString() }
+        val body = DsmUploadBody(fields, RemotePath.name(target), from)
         val query = listOf("api" to "SYNO.FileStation.Upload", "version" to "2", "method" to "upload", "_sid" to (sid ?: ""))
             .joinToString("&") { "${encode(it.first)}=${encode(it.second)}" }
         val r = transport.execute(Request.Builder().url("$entryUrl?$query").post(body).build())
         if (!r.isSuccess) throw RemoteException.Server(r.status)
-        val code = decode(r.body).errorCode ?: return
+        val decoded = decode(r.body)
+        val code = decoded.errorCode ?: return
         if (retrying && code in SESSION_ERRORS) {
             sid = null
             uploadOnce(from, target, modified, false)
             return
         }
-        throw map(code, "SYNO.FileStation.Upload")
+        val mapped = map(code, "SYNO.FileStation.Upload")
+        // Keep what DSM said (e.g. {"code":401,"errors":[…]}) so a failure can be diagnosed.
+        throw if (mapped is RemoteException.Synology) RemoteException.Synology(code, decoded.detail) else mapped
     }
 
     override suspend fun createDirectory(path: String) {
@@ -268,6 +273,7 @@ class SynologyClient(
         private const val AUTH = "SYNO.API.Auth"
         private const val DEVICE_NAME = "Note Android"
         private val SESSION_ERRORS = setOf(106, 107, 119)
+        private val MTIME_SUSPECT_ERRORS = setOf(400, 401)
         private val json = Json { ignoreUnknownKeys = true }
 
         /** Query-string escaping that also escapes "+" and "&" (DSM decodes "+" as space). */
@@ -293,8 +299,10 @@ class SynologyClient(
                 ?: throw RemoteException.InvalidResponse()
             val success = (obj["success"] as? JsonPrimitive)?.booleanOrNull ?: throw RemoteException.InvalidResponse()
             if (success) return Decoded((obj["data"] as? JsonObject) ?: JsonObject(emptyMap()), null)
-            val code = ((obj["error"] as? JsonObject)?.get("code") as? JsonPrimitive)?.intOrNull ?: 100
-            return Decoded(JsonObject(emptyMap()), code)
+            val error = obj["error"] as? JsonObject
+            val code = (error?.get("code") as? JsonPrimitive)?.intOrNull ?: 100
+            val detail = error?.filterKeys { it != "code" }?.takeIf { it.isNotEmpty() }?.let { JsonObject(it).toString().take(200) }
+            return Decoded(JsonObject(emptyMap()), code, detail)
         }
 
         fun map(code: Int, api: String): RemoteException {
@@ -319,6 +327,11 @@ class SynologyClient(
             100 -> "알 수 없는 DSM 오류입니다."
             101, 102, 103, 104 -> "DSM이 이 요청을 지원하지 않습니다. DSM을 업데이트해 주세요."
             105 -> "권한이 없습니다."
+            400 -> "DSM이 파일 작업 요청을 이해하지 못했습니다 (400)."
+            401 -> "DSM이 파일 작업을 거부했습니다 (401)."
+            402 -> "NAS가 바빠 파일 작업을 하지 못했습니다 (402)."
+            403 -> "이 사용자는 이 파일 작업을 할 수 없습니다 (403)."
+            404 -> "이 사용자 그룹은 이 파일 작업을 할 수 없습니다 (404)."
             106 -> "세션이 만료되었습니다."
             107 -> "다른 곳에서 로그인하여 세션이 끊어졌습니다."
             119 -> "세션 ID를 찾을 수 없습니다."

@@ -155,7 +155,7 @@ class SyncEngine(
                 progress?.invoke(SyncProgress(SyncProgress.Phase.TRANSFERRING, done, transfers, RemotePath.name(action.path)))
             }
             try {
-                execute(action, remoteItems, report)
+                withRetry { execute(action, remoteItems, report) }
                 if (action is SyncAction.ConflictCopy) madeCopies = true
             } catch (e: CancellationException) {
                 saveState()
@@ -165,9 +165,9 @@ class SyncEngine(
                     saveState()
                     throw e   // credentials / certificate / full-disk problems stop the whole sync
                 }
-                report.errors += "${RemotePath.name(action.path)}: ${e.message}"
+                report.errors += "${action.path.trimStart('/')}: ${e.message}"
             } catch (e: Exception) {
-                report.errors += "${RemotePath.name(action.path)}: ${e.message}"
+                report.errors += "${action.path.trimStart('/')}: ${e.message}"
             }
             if (action.phase != 4) {
                 done += 1
@@ -202,6 +202,24 @@ class SyncEngine(
             report.errors += next.errors
         }
         return report
+    }
+
+    /**
+     * Retries an action after transient failures (Android drops sockets when the app pauses or
+     * the network changes: "Software caused connection abort"). Every action is idempotent.
+     */
+    private suspend fun withRetry(block: suspend () -> Unit) {
+        var attempt = 0
+        while (true) {
+            try {
+                block()
+                return
+            } catch (e: RemoteException) {
+                if (!e.isTransient || attempt >= 2) throw e
+                attempt += 1
+                kotlinx.coroutines.delay(1000L * attempt)
+            }
+        }
     }
 
     private suspend fun execute(action: SyncAction, remoteItems: Map<String, RemoteItem>, report: SyncReport) {
