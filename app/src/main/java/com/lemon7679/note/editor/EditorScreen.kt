@@ -122,6 +122,7 @@ import com.lemon7679.note.core.PaperStyle
 import com.lemon7679.note.core.RemotePath
 import com.lemon7679.note.ink.BrushKind
 import com.lemon7679.note.ui.NoteIconButton
+import com.lemon7679.note.ui.hoverHighlight
 import com.lemon7679.note.ui.NoteIcons
 import com.lemon7679.note.ui.NoteSheet
 import com.lemon7679.note.ui.NoteTheme
@@ -366,7 +367,7 @@ private fun textHeight(e: PageElement): Double =
 @Composable
 private fun MenuAction(icon: ImageVector, label: String, tint: Color? = null, onClick: () -> Unit) {
     val c = NoteTheme.colors
-    Column(Modifier.clip(RoundedCornerShape(8.dp)).clickable(onClick = onClick).padding(horizontal = 10.dp, vertical = 6.dp),
+    Column(Modifier.hoverHighlight(RoundedCornerShape(8.dp), scale = 1.05f).clip(RoundedCornerShape(8.dp)).clickable(onClick = onClick).padding(horizontal = 10.dp, vertical = 6.dp),
         horizontalAlignment = Alignment.CenterHorizontally) {
         Icon(icon, null, Modifier.size(20.dp), tint = tint ?: c.iconMuted)
         Text(label, fontSize = 11.sp, color = tint ?: c.textPrimary, maxLines = 1)
@@ -522,7 +523,8 @@ private fun ToolRow(model: EditorModel, onPenSettings: () -> Unit, showPenSettin
                 }
                 Spacer(Modifier.width(8.dp))
                 val on = tools.eraseHighlighterOnly
-                Box(Modifier.height(36.dp).clip(RoundedCornerShape(NoteTheme.Radius.control)).background(if (on) c.accentSoft else Color.Transparent)
+                Box(Modifier.height(36.dp).hoverHighlight(RoundedCornerShape(NoteTheme.Radius.control), scale = 1.04f)
+                    .clip(RoundedCornerShape(NoteTheme.Radius.control)).background(if (on) c.accentSoft else Color.Transparent)
                     .clickable { model.updateTools { it.copy(eraseHighlighterOnly = !it.eraseHighlighterOnly) } }.padding(horizontal = 12.dp),
                     contentAlignment = Alignment.Center) {
                     Text("형광펜만", fontSize = 13.sp, color = if (on) c.accent else c.iconMuted)
@@ -535,7 +537,8 @@ private fun ToolRow(model: EditorModel, onPenSettings: () -> Unit, showPenSettin
         Spacer(Modifier.width(8.dp))
         if (tools.tool.inks || tools.tool == EditorTool.ERASER) {
             Box {
-                Row(Modifier.height(36.dp).clip(RoundedCornerShape(NoteTheme.Radius.control))
+                Row(Modifier.height(36.dp).hoverHighlight(RoundedCornerShape(NoteTheme.Radius.control), scale = 1.03f)
+                    .clip(RoundedCornerShape(NoteTheme.Radius.control))
                     .border(1.dp, c.controlBorder, RoundedCornerShape(NoteTheme.Radius.control)).clickable(onClick = onPenSettings)
                     .padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
                     Text(penSummary(tools), fontSize = 13.sp, color = c.iconMuted)
@@ -578,11 +581,11 @@ private fun ColorSwatches(model: EditorModel) {
     Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
         colors.forEach { hex ->
             val selected = t.activeColor.equals(hex, ignoreCase = true)
-            Box(Modifier.size(36.dp).clip(CircleShape).border(2.dp, if (selected) c.accent else Color.Transparent, CircleShape)
+            Box(Modifier.size(36.dp).hoverHighlight(scale = 1.15f).clip(CircleShape).border(2.dp, if (selected) c.accent else Color.Transparent, CircleShape)
                 .clickable { model.updateTools { it.withColor(hex) } }.padding(4.dp).clip(CircleShape).background(hexColor(hex)))
         }
         Box {
-            Box(Modifier.size(36.dp).clip(CircleShape).clickable { picker = true }.padding(5.dp).clip(CircleShape)
+            Box(Modifier.size(36.dp).hoverHighlight(scale = 1.15f).clip(CircleShape).clickable { picker = true }.padding(5.dp).clip(CircleShape)
                 .background(androidx.compose.ui.graphics.Brush.sweepGradient(listOf(Color.Red, Color.Yellow, Color.Green, Color.Cyan, Color.Blue, Color.Magenta, Color.Red))))
             if (picker) {
                 Popup(onDismissRequest = { picker = false }, offset = IntOffset(0, 110), properties = PopupProperties(focusable = true)) {
@@ -631,7 +634,8 @@ private fun WidthPresets(model: EditorModel) {
     val maxWidth = widths.maxOrNull() ?: 1.0
     Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
         widths.forEachIndexed { i, w ->
-            Box(Modifier.size(40.dp).clip(RoundedCornerShape(NoteTheme.Radius.control)).background(if (selected == i) c.fieldFill else Color.Transparent)
+            Box(Modifier.size(40.dp).hoverHighlight(RoundedCornerShape(NoteTheme.Radius.control), scale = 1.1f)
+                .clip(RoundedCornerShape(NoteTheme.Radius.control)).background(if (selected == i) c.fieldFill else Color.Transparent)
                 .clickable {
                     model.updateTools { if (it.tool == EditorTool.HIGHLIGHTER) it.copy(highlighterWidthIndex = i) else it.copy(penWidthIndex = i) }
                 }, contentAlignment = Alignment.Center) {
@@ -668,7 +672,8 @@ private fun PenSettings(model: EditorModel) {
                 FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp), maxItemsInEachRow = 3) {
                     PEN_KINDS.forEach { kind ->
                         val on = t.pen == kind
-                        Box(Modifier.weight(1f).height(40.dp).clip(RoundedCornerShape(NoteTheme.Radius.control))
+                        Box(Modifier.weight(1f).height(40.dp).hoverHighlight(RoundedCornerShape(NoteTheme.Radius.control), scale = 1.04f)
+                            .clip(RoundedCornerShape(NoteTheme.Radius.control))
                             .background(if (on) c.accentSoft else c.fieldFill).clickable { model.updateTools { it.copy(penKind = kind.raw) } },
                             contentAlignment = Alignment.Center) {
                             Text(kind.label, fontSize = 14.sp, fontWeight = if (on) FontWeight.SemiBold else FontWeight.Normal,
@@ -747,7 +752,7 @@ private fun SelectionMenu(anchor: RectF, canvas: CanvasView?) {
             if (colors) {
                 Row(Modifier.padding(6.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     NoteTheme.penColors.forEach { hex ->
-                        Box(Modifier.size(28.dp).clip(CircleShape).background(hexColor(hex)).clickable { canvas?.recolorSelection(hex); colors = false })
+                        Box(Modifier.size(28.dp).hoverHighlight(scale = 1.15f).clip(CircleShape).background(hexColor(hex)).clickable { canvas?.recolorSelection(hex); colors = false })
                     }
                 }
             }

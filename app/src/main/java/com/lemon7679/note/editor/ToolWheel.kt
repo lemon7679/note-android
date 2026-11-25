@@ -25,7 +25,10 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -43,6 +46,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.lemon7679.note.ui.NoteTheme
 import com.lemon7679.note.ui.hexColor
+import com.lemon7679.note.ui.hoverHighlight
 import kotlin.math.PI
 import kotlin.math.cos
 import kotlin.math.roundToInt
@@ -97,6 +101,12 @@ fun ToolWheel(model: EditorModel, anchorX: Float?, anchorY: Float?, onPenSetting
 
     fun ToolState.targeted(): ToolState = if (tool != inkTarget) select(inkTarget) else this
 
+    // Name of the option the stylus is hovering over, shown above the wheel.
+    var hoverLabel by remember { mutableStateOf<String?>(null) }
+    fun hovering(label: String): (Boolean) -> Unit = { on ->
+        if (on) hoverLabel = label else if (hoverLabel == label) hoverLabel = null
+    }
+
     BoxWithConstraints(Modifier.fillMaxSize().pointerInput(Unit) { detectTapGestures { onDismiss() } }) {
         val wPx = with(density) { maxWidth.toPx() }
         val hPx = with(density) { maxHeight.toPx() }
@@ -122,7 +132,9 @@ fun ToolWheel(model: EditorModel, anchorX: Float?, anchorY: Float?, onPenSetting
                     WheelItem.Redo -> model.canRedo
                     else -> true
                 }
-                Box(Modifier.ringOffset(i, WHEEL_ITEMS.size, OUTER_RADIUS).size(ITEM_SIZE.dp).clip(CircleShape)
+                Box(Modifier.ringOffset(i, WHEEL_ITEMS.size, OUTER_RADIUS)
+                    .hoverHighlight(scale = 1.14f, onHover = hovering(item.label))
+                    .size(ITEM_SIZE.dp).clip(CircleShape)
                     .background(if (on) c.accent else c.surface)
                     .border(1.dp, if (on) Color.Transparent else c.controlBorder, CircleShape)
                     .clickable(enabled = enabled) {
@@ -151,7 +163,9 @@ fun ToolWheel(model: EditorModel, anchorX: Float?, anchorY: Float?, onPenSetting
 
             palette.forEachIndexed { i, hex ->
                 val selectedColor = activeColor.equals(hex, ignoreCase = true)
-                Box(Modifier.ringOffset(i, palette.size, INNER_RADIUS).size(34.dp).clip(CircleShape)
+                Box(Modifier.ringOffset(i, palette.size, INNER_RADIUS)
+                    .hoverHighlight(scale = 1.18f, onHover = hovering(if (highlighter) "형광펜 색" else "펜 색"))
+                    .size(34.dp).clip(CircleShape)
                     .border(2.dp, if (selectedColor) c.accent else Color.Transparent, CircleShape)
                     .clickable {
                         model.updateTools { it.targeted().withColor(hex) }
@@ -167,7 +181,7 @@ fun ToolWheel(model: EditorModel, anchorX: Float?, anchorY: Float?, onPenSetting
             val index = (if (highlighter) t.highlighterWidthIndex else t.penWidthIndex).coerceIn(0, widths.size - 1)
             val width = widths[index]
             val maxWidth = widths.maxOrNull() ?: 1.0
-            Column(Modifier.size(52.dp).clip(CircleShape).background(c.surface).border(1.dp, c.controlBorder, CircleShape)
+            Column(Modifier.hoverHighlight(scale = 1.1f, onHover = hovering("굵기 바꾸기")).size(52.dp).clip(CircleShape).background(c.surface).border(1.dp, c.controlBorder, CircleShape)
                 .clickable {
                     val next = (index + 1) % widths.size
                     model.updateTools {
@@ -179,6 +193,20 @@ fun ToolWheel(model: EditorModel, anchorX: Float?, anchorY: Float?, onPenSetting
                 horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(3.dp, Alignment.CenterVertically)) {
                 Box(Modifier.width(22.dp).height(maxOf(2.0, width / maxWidth * 9).dp).clip(CircleShape).background(hexColor(activeColor)))
                 Text(if (highlighter) "%.0fpt".format(width) else "%.1fmm".format(width / 72 * 25.4), fontSize = 10.sp, color = c.textSecondary)
+            }
+        }
+
+        // Hovered option's name, above the wheel (below it when the wheel touches the top edge).
+        hoverLabel?.let { label ->
+            val labelW = with(density) { 200.dp.toPx() }
+            val labelH = with(density) { 30.dp.toPx() }
+            val gap = with(density) { 8.dp.toPx() }
+            val above = cy - half - gap - labelH
+            val y = if (above >= 0f) above else cy + half + gap
+            Box(Modifier.offset { IntOffset((cx - labelW / 2).roundToInt(), y.roundToInt()) }.width(200.dp).height(30.dp),
+                contentAlignment = Alignment.Center) {
+                Text(label, fontSize = 13.sp, color = Color.White, maxLines = 1,
+                    modifier = Modifier.clip(CircleShape).background(Color.Black.copy(alpha = 0.75f)).padding(horizontal = 12.dp, vertical = 5.dp))
             }
         }
     }

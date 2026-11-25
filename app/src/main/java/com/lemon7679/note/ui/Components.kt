@@ -66,6 +66,7 @@ fun NoteIconButton(
     Box(
         Modifier
             .size(NoteTheme.minTouch)
+            .then(if (enabled) Modifier.hoverHighlight(RoundedCornerShape(NoteTheme.Radius.control)) else Modifier)
             .clip(RoundedCornerShape(NoteTheme.Radius.control))
             .background(if (isOn) c.accentSoft else Color.Transparent)
             .clickable(enabled = enabled, onClick = onClick)
@@ -84,6 +85,7 @@ fun PrimaryButton(text: String, modifier: Modifier = Modifier, enabled: Boolean 
     Row(
         modifier
             .heightIn(min = 40.dp)
+            .then(if (enabled) Modifier.hoverHighlight(RoundedCornerShape(NoteTheme.Radius.control), scale = 1.03f) else Modifier)
             .clip(RoundedCornerShape(NoteTheme.Radius.control))
             .background(if (enabled) c.accent else c.offline)
             .clickable(enabled = enabled, onClick = onClick)
@@ -102,6 +104,7 @@ fun SecondaryButton(text: String, modifier: Modifier = Modifier, enabled: Boolea
     Box(
         modifier
             .heightIn(min = 40.dp)
+            .then(if (enabled) Modifier.hoverHighlight(RoundedCornerShape(NoteTheme.Radius.control), scale = 1.03f) else Modifier)
             .clip(RoundedCornerShape(NoteTheme.Radius.control))
             .background(c.surface)
             .border(1.dp, c.controlBorder, RoundedCornerShape(NoteTheme.Radius.control))
@@ -121,6 +124,7 @@ fun NoteChip(title: String, selected: Boolean, onClick: () -> Unit) {
     Box(
         Modifier
             .height(34.dp)
+            .hoverHighlight(CircleShape, scale = 1.05f)
             .clip(CircleShape)
             .background(if (selected) c.chipSelected else c.surface)
             .border(1.dp, if (selected) Color.Transparent else c.controlBorder, CircleShape)
@@ -262,6 +266,7 @@ fun SegmentedPicker(options: List<String>, selected: Int, modifier: Modifier = M
                 Modifier
                     .weight(1f)
                     .fillMaxSize()
+                    .hoverHighlight(RoundedCornerShape(7.dp), scale = 1f)
                     .clip(RoundedCornerShape(7.dp))
                     .then(if (on) Modifier.background(c.surface).border(BorderStroke(0.5.dp, c.separator), RoundedCornerShape(7.dp)) else Modifier)
                     .clickable { onSelect(i) }
