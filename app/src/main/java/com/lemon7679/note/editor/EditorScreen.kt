@@ -48,6 +48,8 @@ import androidx.compose.material.icons.automirrored.outlined.NoteAdd
 import androidx.compose.material.icons.automirrored.outlined.Redo
 import androidx.compose.material.icons.automirrored.outlined.Undo
 import androidx.compose.material.icons.filled.Bookmark
+import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.outlined.RadioButtonUnchecked
 import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material.icons.outlined.AutoFixHigh
 import androidx.compose.material.icons.outlined.BookmarkBorder
@@ -187,6 +189,9 @@ fun NotebookEditor(app: AppModel, model: EditorModel) {
     var imageTarget by remember { mutableStateOf<Triple<String, Float, Float>?>(null) }
     var elementMenu by remember { mutableStateOf<Triple<String, PageElement, RectF>?>(null) }
     var busy by remember { mutableStateOf<String?>(null) }
+    /** Pages waiting for a title before they become a new notebook. */
+    var extracting by remember { mutableStateOf<Set<String>?>(null) }
+    var madeNotebook by remember { mutableStateOf<com.lemon7679.note.app.LibraryRef?>(null) }
     var showSidebar by remember { mutableStateOf<Boolean?>(null) }
     /** Tool wheel (docked in the canvas's top-left corner) is open. */
     var toolWheel by remember { mutableStateOf(false) }
@@ -245,7 +250,8 @@ fun NotebookEditor(app: AppModel, model: EditorModel) {
             if (showSidebar == null) showSidebar = !compact
             Column {
                 TopBar(app, model, compact, showSidebar == true, onSidebar = { showSidebar = showSidebar != true },
-                    onClose = ::close, onPanel = { showPanel = true }, onPaper = { showPaper = true }, onRename = { renaming = true },
+                    onClose = ::close, onPanel = { showPanel = true },
+                    onSelectPages = { model.beginPageSelection(); showSidebar = true }, onPaper = { showPaper = true }, onRename = { renaming = true },
                     onPaste = { canvas?.paste() }, onExport = { kind ->
                         scope.launch {
                             busy = "내보내는 중…"
@@ -274,7 +280,7 @@ fun NotebookEditor(app: AppModel, model: EditorModel) {
         }
         Row(Modifier.weight(1f)) {
             AnimatedVisibility(showSidebar == true) {
-                PageSidebar(model)
+                PageSidebar(model) { extracting = it }
             }
             Box(Modifier.weight(1f).fillMaxHeight()) {
                 AndroidView(factory = { ctx ->
@@ -355,6 +361,41 @@ fun NotebookEditor(app: AppModel, model: EditorModel) {
             },
             dismissButton = { TextButton({ textRequest = null }) { Text("취소") } })
     }
+    extracting?.let { selection ->
+        var title by remember(selection) { mutableStateOf(model.suggestedTitle(selection)) }
+        AlertDialog(onDismissRequest = { extracting = null }, title = { Text("선택한 ${selection.size}쪽으로 새 노트 만들기") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text("필기 · 이미지 · 텍스트 · PDF 배경을 그대로 옮긴 새 노트를 이 노트와 같은 폴더에 만듭니다. 이 노트는 바뀌지 않습니다.",
+                        fontSize = 14.sp, color = c.textSecondary)
+                    OutlinedTextField(title, { title = it }, singleLine = true, label = { Text("제목") }, modifier = Modifier.fillMaxWidth())
+                }
+            },
+            confirmButton = {
+                TextButton({
+                    extracting = null
+                    scope.launch {
+                        busy = "새 노트를 만드는 중…"
+                        madeNotebook = model.makeNotebook(selection, title)
+                        busy = null
+                    }
+                }) { Text("만들기") }
+            },
+            dismissButton = { TextButton({ extracting = null }) { Text("취소") } })
+    }
+    madeNotebook?.let { made ->
+        AlertDialog(onDismissRequest = { madeNotebook = null }, title = { Text("새 노트를 만들었습니다") },
+            text = { Text(FileNaming.split(RemotePath.name(made.path)).first) },
+            confirmButton = {
+                TextButton({
+                    madeNotebook = null
+                    close()
+                    // Let the editor leave the screen before the new notebook opens.
+                    android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({ app.openNotebook(made) }, 300)
+                }) { Text("새 노트 열기") }
+            },
+            dismissButton = { TextButton({ madeNotebook = null }) { Text("계속 편집") } })
+    }
     model.lastError?.let { message ->
         AlertDialog(onDismissRequest = { model.lastError = null }, title = { Text("오류") }, text = { Text(message) },
             confirmButton = { TextButton({ model.lastError = null }) { Text("확인") } })
@@ -389,6 +430,7 @@ private fun TopBar(
     onRename: () -> Unit,
     onPaste: () -> Unit,
     onExport: (Int) -> Unit,
+    onSelectPages: () -> Unit,
 ) {
     val c = NoteTheme.colors
     var pageMenu by remember { mutableStateOf(false) }
@@ -426,6 +468,7 @@ private fun TopBar(
                 DropdownMenuItem({ Text("앞에 페이지 추가") }, { pageMenu = false; model.insertPage(model.currentPageIndex) })
                 DropdownMenuItem({ Text("현재 페이지 복제") }, { pageMenu = false; model.duplicatePage(model.currentPageIndex) })
                 DropdownMenuItem({ Text("종이 바꾸기") }, { pageMenu = false; onPaper() })
+                DropdownMenuItem({ Text("페이지를 골라 새 노트로") }, { pageMenu = false; onSelectPages() })
                 if (model.pageCount > 1) {
                     DropdownMenuItem({ Text("현재 페이지 삭제", color = c.danger) }, { pageMenu = false; model.deletePage(model.currentPageIndex) })
                 }
@@ -763,14 +806,32 @@ private fun SelectionMenu(anchor: RectF, canvas: CanvasView?) {
 // Page sidebar (design: 132)
 
 @Composable
-private fun PageSidebar(model: EditorModel) {
+private fun PageSidebar(model: EditorModel, onMakeNotebook: (Set<String>) -> Unit) {
     val c = NoteTheme.colors
     val list = rememberLazyListState()
     LaunchedEffect(model.currentPageIndex) {
         if (model.currentPageIndex !in list.layoutInfo.visibleItemsInfo.map { it.index }) list.animateScrollToItem(model.currentPageIndex)
     }
+    val selection = model.pageSelection
     Row(Modifier.width(133.dp).fillMaxHeight()) {
-        LazyColumn(Modifier.width(132.dp).fillMaxHeight().background(c.background), state = list,
+      Column(Modifier.width(132.dp).fillMaxHeight().background(c.background)) {
+        if (selection != null) {
+            Column(Modifier.fillMaxWidth().background(c.surface).padding(horizontal = 6.dp, vertical = 6.dp),
+                horizontalAlignment = Alignment.CenterHorizontally) {
+                Text(if (selection.isEmpty()) "페이지 선택" else "${selection.size}쪽 선택됨", fontSize = 13.sp,
+                    fontWeight = FontWeight.SemiBold, color = c.textPrimary)
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                    TextButton({ model.selectAllPages() }, contentPadding = PaddingValues(horizontal = 6.dp)) {
+                        Text(if (selection.size == model.pageCount) "선택 해제" else "모두", fontSize = 13.sp, color = c.accent)
+                    }
+                    TextButton({ model.pageSelection = null }, contentPadding = PaddingValues(horizontal = 6.dp)) {
+                        Text("취소", fontSize = 13.sp, color = c.accent)
+                    }
+                }
+            }
+            Box(Modifier.fillMaxWidth().height(1.dp).background(c.separator))
+        }
+        LazyColumn(Modifier.weight(1f).fillMaxWidth(), state = list,
             contentPadding = PaddingValues(vertical = 14.dp), horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.spacedBy(14.dp)) {
             itemsIndexed(model.document.pages, key = { _, p -> p.id }) { index, page ->
@@ -783,6 +844,20 @@ private fun PageSidebar(model: EditorModel) {
                 }
             }
         }
+        if (selection != null) {
+            Box(Modifier.fillMaxWidth().height(1.dp).background(c.separator))
+            Box(Modifier.fillMaxWidth().background(c.surface).padding(8.dp)) {
+                Row(Modifier.fillMaxWidth().height(44.dp).clip(RoundedCornerShape(10.dp))
+                    .background(if (selection.isEmpty()) c.textSecondary.copy(alpha = 0.4f) else c.accent)
+                    .clickable(enabled = selection.isNotEmpty()) { onMakeNotebook(selection) },
+                    horizontalArrangement = Arrangement.Center, verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.AutoMirrored.Outlined.NoteAdd, null, Modifier.size(16.dp), tint = Color.White)
+                    Spacer(Modifier.width(4.dp))
+                    Text("새 노트로", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = Color.White)
+                }
+            }
+        }
+      }
         Box(Modifier.width(1.dp).fillMaxHeight().background(c.separator))
     }
 }
@@ -790,16 +865,24 @@ private fun PageSidebar(model: EditorModel) {
 @Composable
 private fun PageThumb(model: EditorModel, index: Int, page: com.lemon7679.note.core.NotebookPage) {
     val c = NoteTheme.colors
-    val selected = index == model.currentPageIndex
+    val selecting = model.pageSelection != null
+    val picked = model.pageSelection?.contains(page.id) == true
+    val selected = if (selecting) picked else index == model.currentPageIndex
     var menu by remember { mutableStateOf(false) }
     val bitmap by produceState<android.graphics.Bitmap?>(null, page, model.thumbnailRevision) { value = model.thumbnail(page) }
     Box {
         Column(horizontalAlignment = Alignment.CenterHorizontally,
-            modifier = Modifier.clip(RoundedCornerShape(6.dp)).androidLongClick({ model.go(index) }, { menu = true })) {
+            modifier = Modifier.clip(RoundedCornerShape(6.dp)).androidLongClick({ if (selecting) model.togglePageSelection(page.id) else model.go(index) }, { menu = true })) {
             Box(Modifier.width(84.dp).aspectRatio((page.size.width / page.size.height).toFloat()).clip(RoundedCornerShape(3.dp))
                 .background(Color.White).border(if (selected) 2.dp else 1.dp, if (selected) c.accent else c.separator, RoundedCornerShape(3.dp))) {
                 bitmap?.let { Image(it.asImageBitmap(), null, Modifier.fillMaxSize(), contentScale = ContentScale.FillBounds) }
                 if (page.bookmarked) Icon(Icons.Filled.Bookmark, null, Modifier.align(Alignment.TopEnd).padding(3.dp).size(14.dp), tint = c.danger)
+                if (selecting) {
+                    Icon(if (picked) Icons.Filled.CheckCircle else Icons.Outlined.RadioButtonUnchecked,
+                        if (picked) "선택됨" else "선택 안 됨",
+                        Modifier.align(Alignment.BottomEnd).padding(4.dp).size(22.dp).clip(CircleShape).background(Color.White),
+                        tint = if (picked) c.accent else c.textSecondary)
+                }
             }
             Text("${index + 1}", fontSize = 12.sp, fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
                 color = if (selected) c.accent else c.textSecondary)
@@ -808,6 +891,7 @@ private fun PageThumb(model: EditorModel, index: Int, page: com.lemon7679.note.c
             DropdownMenuItem({ Text("앞에 페이지 추가") }, { menu = false; model.insertPage(index) })
             DropdownMenuItem({ Text("뒤에 페이지 추가") }, { menu = false; model.addPage(index) })
             DropdownMenuItem({ Text("복제") }, { menu = false; model.duplicatePage(index) })
+            if (!selecting) DropdownMenuItem({ Text("선택해서 새 노트로") }, { menu = false; model.beginPageSelection(index) })
             DropdownMenuItem({ Text(if (page.bookmarked) "책갈피 해제" else "책갈피") }, { menu = false; model.toggleBookmark(index) })
             if (index > 0) DropdownMenuItem({ Text("위로 이동") }, { menu = false; model.movePage(index, index - 1) })
             if (index < model.pageCount - 1) DropdownMenuItem({ Text("아래로 이동") }, { menu = false; model.movePage(index, index + 1) })

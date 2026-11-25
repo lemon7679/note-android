@@ -47,6 +47,50 @@ class StorageTest {
         assertEquals("원본 사본", copy.readDocument().title)
     }
 
+    @Test fun extractPagesMakesASeparateNotebook() {
+        val pdf = File(dir, "교재.pdf").apply { writeText("%PDF-1.4 fake") }
+        val pkg = NotebookPackage.createAnnotating(pdf, "교재", List(5) { PageSize(612.0, 792.0) }, File(dir, "lib"), "/교재.pdf")
+        val image = pkg.addAsset(byteArrayOf(7), "jpg")
+        var doc = pkg.readDocument()
+        doc = doc.copy(pages = doc.pages.mapIndexed { i, p ->
+            if (i == 3) p.copy(bookmarked = true, elements = listOf(PageElement(kind = PageElement.Kind.IMAGE,
+                frame = ElementFrame(0.0, 0.0, 10.0, 10.0), asset = image))) else p
+        })
+        pkg.write(doc)
+        pkg.writeInk(byteArrayOf(4), doc.pages[3].id)
+        pkg.writeInk(byteArrayOf(2), doc.pages[1].id)
+        // Selection order does not matter: the notebook's page order is kept.
+        val ids = listOf(doc.pages[3].id, doc.pages[1].id)
+
+        // Whole PDF copied: page numbers stay.
+        val whole = pkg.extractPages(ids, "발췌", File(dir, "lib"))
+        val wholeDoc = whole.readDocument()
+        assertNotEquals(doc.id, wholeDoc.id)
+        assertEquals("발췌", wholeDoc.title)
+        assertEquals(listOf(1, 3), wholeDoc.pages.map { it.background.pdfPageIndex })
+        assertEquals(listOf(false, true), wholeDoc.pages.map { it.bookmarked })
+        assertNull(wholeDoc.pdf?.linkedPath)
+        assertTrue(wholeDoc.pages.none { p -> doc.pages.any { it.id == p.id } })
+        assertEquals(listOf<Byte>(2), whole.readInk(wholeDoc.pages[0].id)?.toList())
+        assertEquals(listOf<Byte>(4), whole.readInk(wholeDoc.pages[1].id)?.toList())
+        assertTrue(whole.assetFile(image).exists())
+        assertEquals(pdf.readText(), whole.assetFile("source.pdf").readText())
+
+        // Subset PDF: pages are renumbered into it.
+        var asked = emptyList<Int>()
+        val subset = pkg.extractPages(ids, "발췌", File(dir, "lib")) { _, indices, destination ->
+            asked = indices
+            destination.writeText("%PDF subset")
+            true
+        }
+        assertEquals("발췌 2.inknote", subset.dir.name)
+        assertEquals(listOf(1, 3), asked)
+        assertEquals(listOf(0, 1), subset.readDocument().pages.map { it.background.pdfPageIndex })
+
+        // The original is untouched.
+        assertEquals(doc, pkg.readDocument())
+    }
+
     @Test fun newerFormatIsRejected() {
         val pkg = NotebookPackage.create(dir, NotebookDocument.create("미래"))
         pkg.documentFile.writeText(pkg.documentFile.readText().replace("\"format\": 1", "\"format\": 99"))

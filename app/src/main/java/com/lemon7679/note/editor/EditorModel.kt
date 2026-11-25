@@ -20,6 +20,7 @@ import com.lemon7679.note.core.PageBackground
 import com.lemon7679.note.core.PageElement
 import com.lemon7679.note.core.PaperStyle
 import com.lemon7679.note.core.PaperTemplate
+import com.lemon7679.note.core.RemotePath
 import com.lemon7679.note.core.newId
 import com.lemon7679.note.ink.BrushKind
 import com.lemon7679.note.ink.EraserMode
@@ -169,6 +170,8 @@ class EditorModel(val app: AppModel, val ref: LibraryRef, file: File) {
     var thumbnailRevision by mutableIntStateOf(0)
         private set
     var lastError by mutableStateOf<String?>(null)
+    /** Pages picked in the page list to make a new notebook from (null: not picking). */
+    var pageSelection by mutableStateOf<Set<String>?>(null)
 
     val pdf: PdfHandle? = document.pdf?.let { PdfHandle.open(pkg.assetFile(it.file)) }
     var canvas: CanvasControlling? = null
@@ -532,6 +535,55 @@ class EditorModel(val app: AppModel, val ref: LibraryRef, file: File) {
         pages.values.forEach { it.dispose() }
         pages.clear()
         pdf?.close()
+    }
+
+    // New notebook from pages
+
+    fun beginPageSelection(index: Int = currentPageIndex) {
+        pageSelection = setOfNotNull(document.pages.getOrNull(index)?.id)
+    }
+
+    fun togglePageSelection(id: String) {
+        val selection = pageSelection ?: return
+        pageSelection = if (id in selection) selection - id else selection + id
+    }
+
+    fun selectAllPages() {
+        if (pageSelection == null) return
+        pageSelection = if (pageSelection?.size == pageCount) emptySet() else document.pages.map { it.id }.toSet()
+    }
+
+    /** "운영체제 3–5, 8쪽": the default title for a notebook made of the selected pages. */
+    fun suggestedTitle(selection: Set<String>): String {
+        val numbers = document.pages.indices.filter { document.pages[it].id in selection }.map { it + 1 }
+        val parts = mutableListOf<String>()
+        var i = 0
+        while (i < numbers.size) {
+            var j = i
+            while (j + 1 < numbers.size && numbers[j + 1] == numbers[j] + 1) j++
+            parts += if (i == j) "${numbers[i]}" else "${numbers[i]}–${numbers[j]}"
+            i = j + 1
+        }
+        return "${document.title} ${parts.joinToString(", ")}쪽"
+    }
+
+    /** Saves, then writes the selected pages as a new notebook next to this one. */
+    suspend fun makeNotebook(selection: Set<String>, title: String): LibraryRef? {
+        save()
+        val folder = RemotePath.parent(ref.path)
+        val lib = app.library(ref.source)
+        val ids = document.pages.map { it.id }.filter { it in selection }
+        val name = title.trim().ifEmpty { suggestedTitle(selection) }
+        return try {
+            val made = withContext(Dispatchers.IO) { pkg.extractPages(ids, name, lib.file(folder)) }
+            app.refreshLibrary()
+            app.localChange(ref.source)
+            pageSelection = null
+            LibraryRef(ref.source, RemotePath.join(folder, made.dir.name))
+        } catch (e: Exception) {
+            lastError = "새 노트를 만들지 못했습니다. ${e.message ?: ""}"
+            null
+        }
     }
 
     // Export

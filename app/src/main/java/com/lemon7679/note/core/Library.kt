@@ -81,6 +81,72 @@ class NotebookPackage(val dir: File) {
         return target
     }
 
+    /**
+     * Makes a new, separate notebook in [directory] from the pages [pageIds] of this one
+     * (in this notebook's order): their ink, text, images, paper and bookmarks.
+     *
+     * When the pages sit on the notebook's PDF, [subsetPdf] may write a PDF holding only the
+     * PDF pages used (zero-based, in order) to the destination file and return true; the new
+     * pages then point into that smaller PDF. Without it (or when it fails) the whole PDF is
+     * copied and the pages keep their page numbers.
+     */
+    fun extractPages(
+        pageIds: List<String>, title: String, directory: File,
+        subsetPdf: ((source: File, pageIndices: List<Int>, destination: File) -> Boolean)? = null,
+    ): NotebookPackage {
+        val source = readDocument()
+        val wanted = pageIds.toSet()
+        val picked = source.pages.filter { it.id in wanted }
+        if (picked.isEmpty()) throw NoteException("선택한 페이지가 없습니다.")
+
+        // Fresh page and element ids: the new notebook never shares files with this one.
+        val inkCopies = mutableListOf<Pair<String, String>>()
+        val assets = mutableSetOf<String>()
+        var pages = picked.map { page ->
+            val copy = page.copy(id = newId(), elements = page.elements.map { it.copy(id = newId()) })
+            page.elements.mapNotNullTo(assets) { it.asset }
+            inkCopies += page.id to copy.id
+            copy
+        }
+        val pdfIndices = picked.mapNotNull { it.background.pdfPageIndex }
+        val pdf = source.pdf?.takeIf { pdfIndices.isNotEmpty() }
+        var doc = NotebookDocument.create(title, source.cover, source.defaultPaper, picked.first().size, 0)
+            .copy(pages = pages, pdf = pdf?.let { PdfSource(it.file, it.originalName) })
+
+        val target = create(directory, doc)
+        try {
+            for ((from, to) in inkCopies) {
+                val f = inkFile(from)
+                if (f.exists()) f.copyTo(target.inkFile(to), overwrite = true)
+            }
+            for (asset in assets) {
+                val f = assetFile(asset)
+                if (f.exists()) f.copyTo(target.assetFile(asset), overwrite = true)
+            }
+            if (pdf != null) {
+                val from = assetFile(pdf.file)
+                val destination = target.assetFile(pdf.file)
+                val used = pdfIndices.distinct().sorted()
+                if (subsetPdf != null && runCatching { subsetPdf(from, used, destination) }.getOrDefault(false)) {
+                    val renumber = used.withIndex().associate { (n, old) -> old to n }
+                    pages = pages.map { p ->
+                        val old = p.background.pdfPageIndex
+                        if (old != null) p.copy(background = PageBackground.pdf(renumber.getValue(old))) else p
+                    }
+                    doc = doc.copy(pages = pages)
+                    target.write(doc)
+                } else {
+                    destination.delete()
+                    from.copyTo(destination, overwrite = true)
+                }
+            }
+        } catch (e: Exception) {
+            target.dir.deleteRecursively()
+            throw e
+        }
+        return target
+    }
+
     companion object {
         const val DOCUMENT_FILE = "document.json"
         const val PAGES_DIRECTORY = "pages"
