@@ -289,33 +289,6 @@ class AppModel(val context: Context) {
         }
     }
 
-    /**
-     * "Note로 열기": a PDF opened or shared from another app is saved into `location` as a
-     * PDF file (not turned into a notebook) and opened in the PDF reader.
-     */
-    fun openIncomingPdf(uri: Uri, location: LibraryLocation) {
-        scope.launch {
-            val file = withContext(Dispatchers.IO) { copyIn(uri) } ?: run {
-                errorMessage = "파일을 읽을 수 없습니다."
-                return@launch
-            }
-            val lib = library(location.source)
-            try {
-                if (PdfSupport.pageSizes(file).isEmpty()) throw RemoteException.InvalidResponse()
-                // Content providers don't always give a ".pdf" display name; the library classifies by extension.
-                val name = if (file.extension.lowercase() == "pdf") file.name else FileNaming.split(file.name).first + ".pdf"
-                val path = withContext(Dispatchers.IO) { lib.importFile(file, location.folder, name) }
-                val ref = LibraryRef(location.source, path)
-                refreshLibrary()
-                localChange(location.source)
-                openDocument = OpenDocument(ref, lib.file(path), OpenDocument.Kind.PDF)
-                noteRecent(ref)
-            } catch (e: Exception) {
-                errorMessage = "PDF를 열지 못했습니다. PDF 파일이 맞는지 확인해 주세요."
-            }
-        }
-    }
-
     fun importFile(uri: Uri, location: LibraryLocation) {
         scope.launch {
             val file = withContext(Dispatchers.IO) { copyIn(uri) } ?: run {

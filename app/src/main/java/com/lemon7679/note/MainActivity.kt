@@ -28,7 +28,7 @@ class MainActivity : ComponentActivity() {
         handle(intent)
     }
 
-    /** "Note로 열기": a PDF shared or opened from another app is saved into 이 기기 and opened as a PDF. */
+    /** "Note로 열기": a PDF shared or opened from another app is imported into 이 기기 and annotated. */
     private fun handle(intent: Intent?) {
         val uri: Uri? = when (intent?.action) {
             Intent.ACTION_VIEW -> intent.data
@@ -37,6 +37,6 @@ class MainActivity : ComponentActivity() {
             else -> null
         }
         uri ?: return
-        app.openIncomingPdf(uri, LibraryLocation(LibrarySource.LOCAL, "/"))
+        app.importPdf(uri, LibraryLocation(LibrarySource.LOCAL, "/"), annotate = true)
     }
 }
