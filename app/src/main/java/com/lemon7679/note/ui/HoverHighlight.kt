@@ -15,16 +15,14 @@ import androidx.compose.ui.composed
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.drawOutline
-import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.unit.dp
 
 /**
  * Highlights a control while a stylus (or mouse) hovers over it, so you can see which option the
- * pen tip will pick before touching the screen: the control grows slightly, gets a soft accent
- * fill and an accent ring.
+ * pen tip will pick before touching the screen: the control grows slightly and gets a soft accent
+ * fill (no outline).
  *
- * Put it before the control's own `clip`/`background` so the ring is drawn outside the clip.
+ * Put it before the control's own `clip`/`background` so the fill is drawn outside the clip.
  * [onHover] reports enter/exit, e.g. to show the hovered option's name.
  */
 fun Modifier.hoverHighlight(
@@ -48,9 +46,8 @@ fun Modifier.hoverHighlight(
         .drawWithContent {
             if (progress > 0f) {
                 val outline = shape.createOutline(size, layoutDirection, this)
-                drawOutline(outline, accent.copy(alpha = 0.14f * progress))
+                drawOutline(outline, accent.copy(alpha = 0.16f * progress))
                 drawContent()
-                drawOutline(outline, accent.copy(alpha = progress), style = Stroke(2.dp.toPx()))
             } else {
                 drawContent()
             }

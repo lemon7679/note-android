@@ -188,8 +188,8 @@ fun NotebookEditor(app: AppModel, model: EditorModel) {
     var elementMenu by remember { mutableStateOf<Triple<String, PageElement, RectF>?>(null) }
     var busy by remember { mutableStateOf<String?>(null) }
     var showSidebar by remember { mutableStateOf<Boolean?>(null) }
-    /** Open tool wheel at a canvas position in view px (null coordinates = centered). */
-    var toolWheel by remember { mutableStateOf<Pair<Float?, Float?>?>(null) }
+    /** Tool wheel (docked in the canvas's top-left corner) is open. */
+    var toolWheel by remember { mutableStateOf(false) }
 
     val pickImage = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
         val target = imageTarget ?: return@rememberLauncherForActivityResult
@@ -214,9 +214,9 @@ fun NotebookEditor(app: AppModel, model: EditorModel) {
             override fun toolChanged() {}
             override fun stylusButtonClicked(x: Float?, y: Float?) {
                 when (app.settings.stylusButtonAction) {
-                    StylusButtonAction.WHEEL -> toolWheel = if (toolWheel != null) null else x to y
+                    StylusButtonAction.WHEEL -> toolWheel = !toolWheel
                     StylusButtonAction.ERASER -> {
-                        toolWheel = null
+                        toolWheel = false
                         model.updateTools { if (it.tool == EditorTool.ERASER) it.select(it.lastInkTool) else it.select(EditorTool.ERASER) }
                     }
                     StylusButtonAction.NONE -> {}
@@ -290,8 +290,8 @@ fun NotebookEditor(app: AppModel, model: EditorModel) {
                 }, modifier = Modifier.fillMaxSize().clipToBounds(),
                     update = { (it.getChildAt(0) as? CanvasView)?.applySettings() })
                 BottomOverlay(model)
-                toolWheel?.let { (x, y) ->
-                    ToolWheel(model, x, y, onPenSettings = { showPenSettings = true }, onDismiss = { toolWheel = null })
+                if (toolWheel) {
+                    ToolWheel(model, onPenSettings = { showPenSettings = true }, onDismiss = { toolWheel = false })
                 }
                 selectionAnchor?.let { anchor -> SelectionMenu(anchor, canvas) }
                 elementMenu?.let { (pageId, element, anchor) ->
