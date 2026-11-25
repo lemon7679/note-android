@@ -22,6 +22,7 @@ import android.view.VelocityTracker
 import android.view.View
 import android.view.ViewConfiguration
 import android.widget.OverScroller
+import com.lemon7679.note.app.PageLayout
 import com.lemon7679.note.core.NotebookPage
 import com.lemon7679.note.core.PageElement
 import com.lemon7679.note.ink.InkAffine
@@ -106,8 +107,15 @@ class CanvasView(context: Context, private val model: EditorModel, private val h
     // Layout (content px at zoom 1) and view transform: view = content * zoom + offset.
     private var pageFrames: List<RectF> = emptyList()
     private var layoutScale = 1f
+    private var contentWidth = 0f
     private var contentHeight = 0f
     private var lastLayoutWidth = 0
+    private var lastLayoutHeight = 0
+    /** The layout the pages were last arranged in: vertical scroll or one page per screen, side by side. */
+    private var layoutMode = PageLayout.VERTICAL
+    private val horizontal get() = layoutMode == PageLayout.HORIZONTAL
+    /** The page a finger swipe started on: a sideways flick turns exactly one page from it. */
+    private var swipeStartPage = 0
     var zoom = 1f
         private set
     private var offX = 0f
@@ -528,7 +536,8 @@ class CanvasView(context: Context, private val model: EditorModel, private val h
 
     override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
         super.onSizeChanged(w, h, oldw, oldh)
-        if (w != lastLayoutWidth) {
+        // Sideways pages fit the screen height too, so a height change re-lays them out.
+        if (w != lastLayoutWidth || (horizontal && h != lastLayoutHeight)) {
             val index = model.currentPageIndex
             relayout()
             scrollToPage(index, false)
@@ -539,9 +548,32 @@ class CanvasView(context: Context, private val model: EditorModel, private val h
         val width = width
         if (width <= 0) return
         lastLayoutWidth = width
+        lastLayoutHeight = height
         val margin = (if (width > 700 * density) 40 else 12) * density
         val maxPageWidth = model.document.pages.maxOfOrNull { it.size.width }?.toFloat() ?: 595f
+        if (horizontal) {
+            // One page per screen-sized slot, side by side; each page fits its slot whole.
+            val h = max(height, 1).toFloat()
+            val maxPageHeight = model.document.pages.maxOfOrNull { it.size.height }?.toFloat() ?: 842f
+            layoutScale = max(min((width - margin * 2) / maxPageWidth, (h - 32 * density) / maxPageHeight), 0.1f)
+            pageFrames = model.document.pages.mapIndexed { i, p ->
+                val pw = p.size.width.toFloat() * layoutScale
+                val ph = p.size.height.toFloat() * layoutScale
+                val f = RectF((i * width + (width - pw) / 2).roundToInt().toFloat(), ((h - ph) / 2).roundToInt().toFloat(), 0f, 0f)
+                f.right = f.left + pw.roundToInt()
+                f.bottom = f.top + ph.roundToInt()
+                f
+            }
+            contentWidth = width.toFloat() * max(pageFrames.size, 1)
+            contentHeight = h
+            for ((_, s) in states) s.preview = s.preview?.let { it.recycle(); null }
+            clampOffsets()
+            updateVisible()
+            invalidate()
+            return
+        }
         layoutScale = max((width - margin * 2) / maxPageWidth, 0.1f)
+        contentWidth = width.toFloat()
         var y = 24 * density
         pageFrames = model.document.pages.map { p ->
             val w = p.size.width.toFloat() * layoutScale
@@ -560,10 +592,18 @@ class CanvasView(context: Context, private val model: EditorModel, private val h
     }
 
     private fun clampOffsets() {
-        val cw = width * zoom
+        offX = clampX(offX)
+        offY = clampY(offY)
+    }
+
+    private fun clampX(x: Float): Float {
+        val cw = contentWidth * zoom
+        return if (cw <= width) (width - cw) / 2 else x.coerceIn(width - cw, 0f)
+    }
+
+    private fun clampY(y: Float): Float {
         val ch = contentHeight * zoom
-        offX = if (cw <= width) (width - cw) / 2 else offX.coerceIn(width - cw, 0f)
-        offY = if (ch <= height) 0f else offY.coerceIn(height - ch, 0f)
+        return if (ch <= height) (if (horizontal) (height - ch) / 2 else 0f) else y.coerceIn(height - ch, 0f)
     }
 
     private fun visibleContent(): RectF = RectF(-offX / zoom, -offY / zoom, (width - offX) / zoom, (height - offY) / zoom)
@@ -571,7 +611,7 @@ class CanvasView(context: Context, private val model: EditorModel, private val h
     private fun updateVisible() {
         if (pageFrames.isEmpty()) return
         val visible = visibleContent()
-        val keep = RectF(visible).apply { inset(0f, -visible.height()) }
+        val keep = RectF(visible).apply { if (horizontal) inset(-visible.width(), 0f) else inset(0f, -visible.height()) }
         val pages = model.document.pages
         val wanted = HashSet<String>()
         pageFrames.forEachIndexed { i, f ->
@@ -584,13 +624,17 @@ class CanvasView(context: Context, private val model: EditorModel, private val h
         }
         val drop = states.keys.filter { it !in wanted && states[it] !== activePage }
         drop.forEach { states.remove(it)?.dispose() }
-        // Current page = the one under the middle of the screen.
+        // Current page = the one under the middle of the screen (sideways: the nearest one).
         val midX = visible.centerX()
         val midY = visible.centerY()
-        val index = pageFrames.indexOfFirst { RectF(it).apply { inset(-12f, -12f) }.contains(midX, midY) }
+        val index = if (horizontal) nearestPage(midX)
+            else pageFrames.indexOfFirst { RectF(it).apply { inset(-12f, -12f) }.contains(midX, midY) }
         if (index >= 0 && index != model.currentPageIndex) model.currentPageIndex = index
         scheduleFrame()
     }
+
+    private fun nearestPage(contentX: Float): Int =
+        pageFrames.indices.minByOrNull { abs(pageFrames[it].centerX() - contentX) } ?: -1
 
     private fun frameOf(id: String): RectF? = model.document.pageIndex(id)?.let { pageFrames.getOrNull(it) }
 
@@ -1067,6 +1111,7 @@ class CanvasView(context: Context, private val model: EditorModel, private val h
         val id = e.getPointerId(i)
         if (e.actionMasked == MotionEvent.ACTION_DOWN) {
             scroller.forceFinished(true)
+            swipeStartPage = model.currentPageIndex
             tapCandidate = true
             tapMaxFingers = 0
             tapMoved = false
@@ -1416,14 +1461,63 @@ class CanvasView(context: Context, private val model: EditorModel, private val h
             updateVisible()
             selection?.let { host.selectionChanged(selectionAnchor(it)) }
         }
+        if (horizontal) {
+            if (fingers.isEmpty()) turnPage(vx, vy)
+            return
+        }
         if (fingers.isEmpty() && (abs(vx) > 300 || abs(vy) > 300)) {
-            val cw = (width * zoom).toInt()
+            val cw = (contentWidth * zoom).toInt()
             val ch = (contentHeight * zoom).toInt()
             val minX = if (cw <= width) offX.toInt() else width - cw
             val maxX = if (cw <= width) offX.toInt() else 0
             scroller.fling(offX.toInt(), offY.toInt(), vx.toInt(), vy.toInt(), minX, maxX, min(0, height - ch), 0)
             scheduleFrame()
         }
+    }
+
+    /**
+     * Sideways pages: a swipe ends on a whole page — the next or previous one for a flick,
+     * otherwise the one nearest the middle of the screen. Zoomed in, the page pans (and flings)
+     * freely within its own width, and dragging well into a neighbouring page turns to it.
+     */
+    private fun turnPage(vx: Float, vy: Float) {
+        if (pageFrames.isEmpty() || width <= 0) return
+        val start = swipeStartPage.coerceIn(0, pageFrames.size - 1)
+        val mid = (width / 2f - offX) / zoom
+        var index = nearestPage(mid).coerceAtLeast(0)
+        val zoomed = zoom > 1.01f
+        val frame = pageFrames[start]
+        val pageWider = frame.width() * zoom > width
+        if (zoomed && pageWider && index == start) {
+            // Zoomed in on this page: fling within it, never into the neighbours.
+            if (abs(vx) > 300 || abs(vy) > 300) {
+                val minX = clampX(width - (frame.right * zoom + 16 * density)).toInt()
+                val maxX = clampX(-(frame.left * zoom - 16 * density)).toInt()
+                val ch = (contentHeight * zoom).toInt()
+                scroller.fling(offX.toInt(), offY.toInt(), vx.toInt(), vy.toInt(), min(minX, maxX), max(minX, maxX),
+                    min(0, height - ch), if (ch <= height) offY.toInt() else 0)
+                scheduleFrame()
+            }
+            return
+        }
+        if (!(zoomed && pageWider) && abs(vx) > 300 && abs(vx) > abs(vy)) {
+            index = if (vx < 0) min(start + 1, pageFrames.size - 1) else max(start - 1, 0)
+        }
+        val (tx, ty) = pageOffset(index)
+        scroller.forceFinished(true)
+        scroller.startScroll(offX.toInt(), offY.toInt(), (tx - offX).roundToInt(), (ty - offY).roundToInt(), 260)
+        scheduleFrame()
+    }
+
+    /** The view offset that shows page [index] (sideways: centred in the screen). */
+    private fun pageOffset(index: Int): Pair<Float, Float> {
+        val f = pageFrames[index]
+        if (horizontal) {
+            val x = width / 2f - f.centerX() * zoom
+            val y = if (zoom > 1.01f) offY else height / 2f - f.centerY() * zoom
+            return clampX(x) to clampY(y)
+        }
+        return offX to clampY(-(f.top * zoom - 16 * density))
     }
 
     // ------------------------------------------------------------------ scratch-out
@@ -1618,15 +1712,15 @@ class CanvasView(context: Context, private val model: EditorModel, private val h
     }
 
     override fun scrollToPage(index: Int, animated: Boolean) {
-        val f = pageFrames.getOrNull(index) ?: return
+        if (pageFrames.getOrNull(index) == null) return
         scroller.forceFinished(true)
-        val target = -(f.top * zoom - 16 * density)
+        val (tx, ty) = pageOffset(index)
         if (animated && width > 0) {
-            val clamped = target.coerceIn(min(0f, height - contentHeight * zoom), 0f)
-            scroller.startScroll(offX.toInt(), offY.toInt(), 0, (clamped - offY).toInt(), 300)
+            scroller.startScroll(offX.toInt(), offY.toInt(), (tx - offX).roundToInt(), (ty - offY).roundToInt(), 300)
             scheduleFrame()
         } else {
-            offY = target
+            offX = tx
+            offY = ty
             clampOffsets()
             updateVisible()
         }
@@ -1642,6 +1736,15 @@ class CanvasView(context: Context, private val model: EditorModel, private val h
     /** Re-reads tool and settings state. */
     fun applySettings() {
         if (tools.tool != EditorTool.LASSO && selection != null) clearSelection()
+        if (settings.pageLayout != layoutMode) {
+            val index = model.currentPageIndex
+            layoutMode = settings.pageLayout
+            scroller.forceFinished(true)
+            zoom = 1f
+            renderZoom = 1f
+            relayout()
+            scrollToPage(index, false)
+        }
         invalidate()
     }
 }

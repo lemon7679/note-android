@@ -82,6 +82,7 @@ import com.lemon7679.note.app.AppModel
 import com.lemon7679.note.app.LibraryLocation
 import com.lemon7679.note.app.LibraryRef
 import com.lemon7679.note.app.LibrarySource
+import com.lemon7679.note.app.PageLayout
 import com.lemon7679.note.app.StylusButtonAction
 import com.lemon7679.note.app.libraryDateLabel
 import com.lemon7679.note.app.relativeLabel
@@ -657,6 +658,15 @@ fun SettingsScreen(app: AppModel, onEditAccount: (NasAccount) -> Unit, onDismiss
                     Text("펜을 화면 가까이 띄운 채 버튼을 누르면 펜 끝에 도구 · 색 · 굵기 · 펜 설정 휠이 열립니다. " +
                         "버튼을 누른 채 쓰면 지금처럼 지워집니다. 갤럭시에서 에어 커맨드가 대신 열리면 " +
                         "설정 › 유용한 기능 › S펜 › 에어 커맨드에서 \"펜 버튼으로 열기\"를 끄세요.",
+                        style = NoteTheme.Fonts.caption, color = c.textSecondary)
+                }
+                CardDivider()
+                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("페이지 넘기기", style = NoteTheme.Fonts.body, color = c.textPrimary)
+                    SegmentedPicker(PageLayout.entries.map { it.label }, s.pageLayout.ordinal) { i ->
+                        app.updateSettings { it.copy(pageLayout = PageLayout.entries[i]) }
+                    }
+                    Text("옆으로 넘기기: 한 화면에 한 페이지씩 보이고, 손가락으로 옆으로 밀어 페이지를 넘깁니다.",
                         style = NoteTheme.Fonts.caption, color = c.textSecondary)
                 }
                 CardDivider()

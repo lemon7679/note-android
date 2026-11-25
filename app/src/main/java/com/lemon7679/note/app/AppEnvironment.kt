@@ -90,6 +90,15 @@ enum class StylusButtonAction(val label: String) {
     @SerialName("none") NONE("사용 안 함"),
 }
 
+/** How a notebook's pages are laid out in the editor. */
+@Serializable
+enum class PageLayout(val label: String) {
+    /** One continuous vertical scroll. */
+    @SerialName("vertical") VERTICAL("세로 스크롤"),
+    /** One page per screen; swipe sideways to turn pages. */
+    @SerialName("horizontal") HORIZONTAL("옆으로 넘기기"),
+}
+
 /** App-wide preferences. */
 @Serializable
 data class AppSettings(
@@ -101,6 +110,8 @@ data class AppSettings(
     val scribbleToErase: Boolean = true,
     /** Stylus button click while hovering (holding it while drawing always erases). */
     val stylusButtonAction: StylusButtonAction = StylusButtonAction.WHEEL,
+    /** Continuous vertical scroll or sideways page turning. */
+    val pageLayout: PageLayout = PageLayout.VERTICAL,
     /** Render ink with the GPU (OpenGL ES 3): page tiles on worker threads and the stroke being
      *  drawn on a low-latency front buffer. Falls back to the CPU where unsupported. */
     val gpuRendering: Boolean = true,

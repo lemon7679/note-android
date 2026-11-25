@@ -111,6 +111,7 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.lemon7679.note.app.AppModel
 import com.lemon7679.note.app.OpenDocument
+import com.lemon7679.note.app.PageLayout
 import com.lemon7679.note.app.StylusButtonAction
 import com.lemon7679.note.core.CoverStyle
 import com.lemon7679.note.core.ElementFrame
@@ -235,6 +236,7 @@ fun NotebookEditor(app: AppModel, model: EditorModel) {
         onDispose { lifecycle.removeObserver(obs) }
     }
     LaunchedEffect(model.tools.tool) { canvas?.applySettings() }
+    LaunchedEffect(app.settings.pageLayout) { canvas?.applySettings() }
 
     Column(Modifier.fillMaxSize().background(c.desk).windowInsetsPadding(WindowInsets.safeDrawing)) {
         BoxWithConstraints(Modifier.fillMaxWidth()) {
@@ -450,6 +452,11 @@ private fun TopBar(
                 if (app.strokeClipboard != null) DropdownMenuItem({ Text("붙여넣기") }, { moreMenu = false; onPaste() },
                     leadingIcon = { Icon(Icons.Outlined.ContentPaste, null) })
                 HorizontalDivider()
+                DropdownMenuItem({ Text("옆으로 넘기기") }, {
+                    app.updateSettings {
+                        it.copy(pageLayout = if (it.pageLayout == PageLayout.HORIZONTAL) PageLayout.VERTICAL else PageLayout.HORIZONTAL)
+                    }
+                }, trailingIcon = { androidx.compose.material3.Checkbox(app.settings.pageLayout == PageLayout.HORIZONTAL, null) })
                 DropdownMenuItem({ Text("손가락으로 그리기") }, { app.updateSettings { it.copy(stylusOnly = !it.stylusOnly) } },
                     trailingIcon = { androidx.compose.material3.Checkbox(!app.settings.stylusOnly, null) })
                 DropdownMenuItem({ Text("두 손가락 탭으로 실행 취소") }, { app.updateSettings { it.copy(tapGesturesUndo = !it.tapGesturesUndo) } },
