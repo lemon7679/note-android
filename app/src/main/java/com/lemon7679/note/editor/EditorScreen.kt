@@ -94,6 +94,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -193,8 +194,8 @@ fun NotebookEditor(app: AppModel, model: EditorModel) {
     var extracting by remember { mutableStateOf<Set<String>?>(null) }
     var madeNotebook by remember { mutableStateOf<com.lemon7679.note.app.LibraryRef?>(null) }
     var showSidebar by remember { mutableStateOf<Boolean?>(null) }
-    /** Tool wheel (docked in the canvas's top-left corner) is open. */
-    var toolWheel by remember { mutableStateOf(false) }
+    /** Tool palette is open around this point (canvas px: the pen tip; Unspecified = the middle). */
+    var toolWheel by remember { mutableStateOf<Offset?>(null) }
 
     val pickImage = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
         val target = imageTarget ?: return@rememberLauncherForActivityResult
@@ -219,9 +220,10 @@ fun NotebookEditor(app: AppModel, model: EditorModel) {
             override fun toolChanged() {}
             override fun stylusButtonClicked(x: Float?, y: Float?) {
                 when (app.settings.stylusButtonAction) {
-                    StylusButtonAction.WHEEL -> toolWheel = !toolWheel
+                    StylusButtonAction.WHEEL -> toolWheel =
+                        if (toolWheel != null) null else if (x != null && y != null) Offset(x, y) else Offset.Unspecified
                     StylusButtonAction.ERASER -> {
-                        toolWheel = false
+                        toolWheel = null
                         model.updateTools { if (it.tool == EditorTool.ERASER) it.select(it.lastInkTool) else it.select(EditorTool.ERASER) }
                     }
                     StylusButtonAction.NONE -> {}
@@ -296,8 +298,8 @@ fun NotebookEditor(app: AppModel, model: EditorModel) {
                 }, modifier = Modifier.fillMaxSize().clipToBounds(),
                     update = { (it.getChildAt(0) as? CanvasView)?.applySettings() })
                 BottomOverlay(model)
-                if (toolWheel) {
-                    ToolWheel(model, onPenSettings = { showPenSettings = true }, onDismiss = { toolWheel = false })
+                toolWheel?.let { at ->
+                    ToolWheel(model, at, onPenSettings = { showPenSettings = true }, onDismiss = { toolWheel = null })
                 }
                 selectionAnchor?.let { anchor -> SelectionMenu(anchor, canvas) }
                 elementMenu?.let { (pageId, element, anchor) ->
