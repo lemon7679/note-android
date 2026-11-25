@@ -319,6 +319,43 @@ class LibraryFileSystem(val root: File) {
     fun importFile(source: File, folder: String, preferredName: String? = null): String =
         importStream(source.inputStream(), preferredName ?: source.name, folder)
 
+    /**
+     * Copies `path` of another library source — a file, or a notebook package — into `folder`
+     * under a unique name, and checks that every file arrived complete. A partial copy is
+     * removed. The original is left for the caller to delete.
+     */
+    fun copyFrom(other: LibraryFileSystem, path: String, folder: String): String {
+        val original = other.file(path)
+        val name = RemotePath.name(path)
+        val isPackage = original.isDirectory && RemotePath.pathExtension(name) == FileNaming.NOTEBOOK_EXTENSION
+        val label = if (isPackage) FileNaming.split(name).first else name
+        if (!original.isFile && !isPackage) throw NoteException("‘$label’을(를) 찾을 수 없습니다.")
+        val target = if (isPackage) {
+            val (base, ext) = FileNaming.split(name)
+            RemotePath.join(folder, FileNaming.unique(base, ext) { exists(RemotePath.join(folder, it)) })
+        } else null
+        var copied: String? = target
+        try {
+            if (target != null) {
+                file(folder).mkdirs()
+                original.copyRecursively(file(target))
+            } else {
+                copied = importFile(original, folder, name)
+            }
+            if (contentSize(file(copied!!)) != contentSize(original)) throw NoteException("‘$label’을(를) 끝까지 복사하지 못했습니다.")
+            return copied
+        } catch (e: Exception) {
+            copied?.let { file(it).deleteRecursively() }
+            throw e as? NoteException ?: NoteException("‘$label’을(를) 끝까지 복사하지 못했습니다.")
+        }
+    }
+
+    /** Number of files and total bytes under `f` (a file counts as one). */
+    private fun contentSize(f: File): Pair<Int, Long> {
+        val files = f.walkTopDown().filter { it.isFile }.toList()
+        return files.size to files.sumOf { it.length() }
+    }
+
     fun importStream(input: java.io.InputStream, fileName: String, folder: String): String {
         val (base, ext) = FileNaming.split(FileNaming.sanitize(fileName))
         val name = FileNaming.unique(base, ext) { exists(RemotePath.join(folder, it)) }

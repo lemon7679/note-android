@@ -142,4 +142,37 @@ class StorageTest {
         assertEquals(listOf(1f, 1f, 4f, 1f, 4f, 4f, 1f, 4f), outlines[0].holes[0].toList())
         assertTrue(outlines[1].holes.isEmpty())
     }
+
+    @Test fun notebookAndFileCopyToAnotherSource() {
+        val device = LibraryFileSystem(File(dir, "device"))
+        val nas = LibraryFileSystem(File(dir, "nas"))
+        val pdf = File(dir, "모의고사.pdf").apply { writeBytes(ByteArray(2048) { it.toByte() }) }
+        val pkg = NotebookPackage.createAnnotating(pdf, "모의고사", listOf(PageSize(595.0, 842.0)), device.root)
+        val doc = pkg.readDocument()
+        pkg.writeInk(byteArrayOf(4, 5, 6), doc.pages[0].id)
+        val notePath = "/" + pkg.dir.name
+        nas.createFolder("국어", "/")
+        NotebookPackage.create(nas.file("/국어"), NotebookDocument.create("모의고사"))
+
+        val copied = nas.copyFrom(device, notePath, "/국어")
+        assertEquals("/국어/모의고사 2.inknote", copied)
+        val back = NotebookPackage(nas.file(copied))
+        assertEquals(doc.id, back.readDocument().id)
+        assertEquals(listOf<Byte>(4, 5, 6), back.readInk(doc.pages[0].id)?.toList())
+        assertEquals(2048L, File(back.assetsDir, "source.pdf").length())
+        assertEquals(LibraryItemKind.NOTEBOOK, nas.list("/국어").first { it.path == copied }.kind)
+        // The original stays until the caller removes it.
+        assertTrue(device.exists(notePath))
+
+        device.importFile(pdf, "/")
+        assertEquals("/모의고사.pdf", nas.copyFrom(device, "/모의고사.pdf", "/"))
+        assertEquals(2048L, nas.file("/모의고사.pdf").length())
+
+        try {
+            nas.copyFrom(device, "/없음.inknote", "/")
+            throw AssertionError("expected not found")
+        } catch (e: NoteException) {
+            assertTrue(e.message!!.contains("없음"))
+        }
+    }
 }

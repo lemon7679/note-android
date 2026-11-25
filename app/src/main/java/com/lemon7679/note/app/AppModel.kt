@@ -354,32 +354,30 @@ class AppModel(val context: Context) {
         replaceRef(ref, LibraryRef(ref.source, lib.move(ref.path, folder)))
     }
 
-    /** Whether `item` can be moved to another storage (e.g. a PDF on this device → a NAS). */
+    /**
+     * Whether `item` can be moved to another storage: a note (including one made from a PDF
+     * with "Note로 열기" / PDF 가져오기), PDF or other file on this device → a NAS. Folders stay
+     * within their storage.
+     */
     fun canMoveAcross(item: LibraryEntry, source: LibrarySource): Boolean =
-        source.isLocal && !item.isPlaceholder && accounts.isNotEmpty() &&
-            (item.kind == LibraryItemKind.PDF || item.kind == LibraryItemKind.IMAGE || item.kind == LibraryItemKind.OTHER)
+        source.isLocal && !item.isPlaceholder && accounts.isNotEmpty() && item.kind != LibraryItemKind.FOLDER
 
     /**
-     * Moves a file from this device into a NAS folder. The file lands in the account's local
+     * Moves a note or file from this device into a NAS folder. It lands in the account's local
      * mirror and goes up with the next sync; the original is removed only after the copy is
      * complete. Recents and favorites follow it.
      */
     fun moveAcross(ref: LibraryRef, target: LibraryLocation) {
         if (ref.source == target.source) return move(ref, target.folder)
-        val name = RemotePath.name(ref.path)
+        val name = RemotePath.name(ref.path).let {
+            if (RemotePath.pathExtension(it) == FileNaming.NOTEBOOK_EXTENSION) FileNaming.split(it).first else it
+        }
         scope.launch {
             toast = "‘$name’ 옮기는 중…"
             try {
                 val newPath = withContext(Dispatchers.IO) {
                     val from = library(ref.source)
-                    val to = library(target.source)
-                    val original = from.file(ref.path)
-                    if (!original.isFile) throw NoteException("‘$name’을(를) 찾을 수 없습니다.")
-                    val path = to.importFile(original, target.folder, name)
-                    if (to.file(path).length() != original.length()) {
-                        to.delete(path)
-                        throw NoteException("‘$name’을(를) 끝까지 복사하지 못했습니다.")
-                    }
+                    val path = library(target.source).copyFrom(from, ref.path, target.folder)
                     from.delete(ref.path)
                     path
                 }

@@ -304,8 +304,8 @@ fun PaperTemplateGrid(selection: PaperTemplate, color: PaperColor, onSelect: (Pa
 }
 
 /**
- * Folder picker for "이동". Lists the item's own storage; a file on this device (PDF etc.)
- * can also go to a folder of any connected NAS. Each storage's root row carries that
+ * Folder picker for "이동". Lists the item's own storage; a note or file on this device
+ * (anything but a folder) can also go to a folder of any connected NAS. Each storage's root row carries that
  * storage's icon (this device: tablet, NAS: its kind).
  */
 @Composable
