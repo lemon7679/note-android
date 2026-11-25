@@ -6,6 +6,10 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
+import androidx.compose.animation.expandVertically
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -61,6 +65,8 @@ import androidx.compose.material.icons.outlined.ContentPaste
 import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.Edit
 import androidx.compose.material.icons.outlined.ExpandMore
+import androidx.compose.material.icons.outlined.Fullscreen
+import androidx.compose.material.icons.outlined.FullscreenExit
 import androidx.compose.material.icons.outlined.Image
 import androidx.compose.material.icons.outlined.IosShare
 import androidx.compose.material.icons.outlined.LibraryAdd
@@ -101,6 +107,7 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
@@ -109,6 +116,9 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupProperties
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
@@ -196,6 +206,8 @@ fun NotebookEditor(app: AppModel, model: EditorModel) {
     var showSidebar by remember { mutableStateOf<Boolean?>(null) }
     /** Tool palette is open around this point (canvas px: the pen tip; Unspecified = the middle). */
     var toolWheel by remember { mutableStateOf<Offset?>(null) }
+    /** Full screen: the top bar, tool row, page list and overlays are hidden; only the page remains. */
+    var menusHidden by remember { mutableStateOf(false) }
 
     val pickImage = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
         val target = imageTarget ?: return@rememberLauncherForActivityResult
@@ -236,7 +248,20 @@ fun NotebookEditor(app: AppModel, model: EditorModel) {
         canvas?.dispose()
         model.close()
     }
-    BackHandler { close() }
+    BackHandler { if (menusHidden) menusHidden = false else close() }
+    // Full screen also hides the status and navigation bars (a swipe from the edge shows them briefly).
+    val view = LocalView.current
+    DisposableEffect(menusHidden) {
+        val window = (view.context as? android.app.Activity)?.window
+        val bars = window?.let { WindowCompat.getInsetsController(it, view) }
+        if (menusHidden) {
+            bars?.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            bars?.hide(WindowInsetsCompat.Type.systemBars())
+        } else {
+            bars?.show(WindowInsetsCompat.Type.systemBars())
+        }
+        onDispose { if (menusHidden) bars?.show(WindowInsetsCompat.Type.systemBars()) }
+    }
     val lifecycle = LocalLifecycleOwner.current.lifecycle
     DisposableEffect(lifecycle) {
         val obs = LifecycleEventObserver { _, e -> if (e == Lifecycle.Event.ON_PAUSE) model.save() }
@@ -247,12 +272,13 @@ fun NotebookEditor(app: AppModel, model: EditorModel) {
     LaunchedEffect(app.settings.pageLayout) { canvas?.applySettings() }
 
     Column(Modifier.fillMaxSize().background(c.desk).windowInsetsPadding(WindowInsets.safeDrawing)) {
+        AnimatedVisibility(!menusHidden, enter = expandVertically() + fadeIn(), exit = shrinkVertically() + fadeOut()) {
         BoxWithConstraints(Modifier.fillMaxWidth()) {
             val compact = maxWidth < 700.dp
             if (showSidebar == null) showSidebar = !compact
             Column {
                 TopBar(app, model, compact, showSidebar == true, onSidebar = { showSidebar = showSidebar != true },
-                    onClose = ::close, onPanel = { showPanel = true },
+                    onClose = ::close, onPanel = { showPanel = true }, onHideMenus = { showPenSettings = false; menusHidden = true },
                     onSelectPages = { model.beginPageSelection(); showSidebar = true }, onPaper = { showPaper = true }, onRename = { renaming = true },
                     onPaste = { canvas?.paste() }, onExport = { kind ->
                         scope.launch {
@@ -280,8 +306,9 @@ fun NotebookEditor(app: AppModel, model: EditorModel) {
                 ToolRow(model, onPenSettings = { showPenSettings = true }, showPenSettings, { showPenSettings = false })
             }
         }
+        }
         Row(Modifier.weight(1f)) {
-            AnimatedVisibility(showSidebar == true) {
+            AnimatedVisibility(showSidebar == true && !menusHidden) {
                 PageSidebar(model) { extracting = it }
             }
             Box(Modifier.weight(1f).fillMaxHeight()) {
@@ -297,9 +324,14 @@ fun NotebookEditor(app: AppModel, model: EditorModel) {
                     }
                 }, modifier = Modifier.fillMaxSize().clipToBounds(),
                     update = { (it.getChildAt(0) as? CanvasView)?.applySettings() })
-                BottomOverlay(model)
+                if (menusHidden) {
+                    ShowMenusButton(Modifier.align(Alignment.TopEnd)) { menusHidden = false }
+                } else {
+                    BottomOverlay(model)
+                }
                 toolWheel?.let { at ->
-                    ToolWheel(model, at, onPenSettings = { showPenSettings = true }, onDismiss = { toolWheel = null })
+                    // Pen settings hang from the tool row, so they bring the menus back.
+                    ToolWheel(model, at, onPenSettings = { menusHidden = false; showPenSettings = true }, onDismiss = { toolWheel = null })
                 }
                 selectionAnchor?.let { anchor -> SelectionMenu(anchor, canvas) }
                 elementMenu?.let { (pageId, element, anchor) ->
@@ -433,6 +465,7 @@ private fun TopBar(
     onPaste: () -> Unit,
     onExport: (Int) -> Unit,
     onSelectPages: () -> Unit,
+    onHideMenus: () -> Unit,
 ) {
     val c = NoteTheme.colors
     var pageMenu by remember { mutableStateOf(false) }
@@ -447,6 +480,7 @@ private fun TopBar(
         }
         NoteIconButton(Icons.Outlined.ViewSidebar, "페이지 목록", isOn = sidebar, onClick = onSidebar)
         if (!compact) {
+            NoteIconButton(Icons.Outlined.Fullscreen, "메뉴 숨기기", onClick = onHideMenus)
             val bookmarked = model.currentPage.bookmarked
             NoteIconButton(if (bookmarked) Icons.Filled.Bookmark else Icons.Outlined.BookmarkBorder, "책갈피", isOn = bookmarked) {
                 model.toggleBookmark(model.currentPageIndex)
@@ -493,6 +527,8 @@ private fun TopBar(
                         { moreMenu = false; model.toggleBookmark(model.currentPageIndex) })
                     DropdownMenuItem({ Text("검색과 책갈피") }, { moreMenu = false; onPanel() })
                 }
+                DropdownMenuItem({ Text("메뉴 숨기기 (전체 화면)") }, { moreMenu = false; onHideMenus() },
+                    leadingIcon = { Icon(Icons.Outlined.Fullscreen, null) })
                 DropdownMenuItem({ Text("이름 변경") }, { moreMenu = false; onRename() })
                 DropdownMenuItem({ Text("표지…") }, { moreMenu = false; coverMenu = true })
                 if (app.strokeClipboard != null) DropdownMenuItem({ Text("붙여넣기") }, { moreMenu = false; onPaste() },
@@ -756,6 +792,17 @@ private fun LabeledSlider(title: String, value: String, current: Float, range: C
 }
 
 // Overlays
+
+/** The one control left in full screen: a small, faint button in the top-right corner. */
+@Composable
+private fun ShowMenusButton(modifier: Modifier, onClick: () -> Unit) {
+    Box(modifier.padding(8.dp).size(NoteTheme.minTouch).hoverHighlight(scale = 1.1f).clip(CircleShape).clickable(onClick = onClick),
+        contentAlignment = Alignment.Center) {
+        Box(Modifier.size(36.dp).clip(CircleShape).background(Color.Black.copy(alpha = 0.28f)), contentAlignment = Alignment.Center) {
+            Icon(Icons.Outlined.FullscreenExit, "메뉴 보이기", Modifier.size(20.dp), tint = Color.White)
+        }
+    }
+}
 
 @Composable
 private fun BottomOverlay(model: EditorModel) {
