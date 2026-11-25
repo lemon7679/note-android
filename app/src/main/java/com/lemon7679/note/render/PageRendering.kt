@@ -222,11 +222,26 @@ object ElementDrawing {
             .setAlignment(Layout.Alignment.ALIGN_NORMAL).build()
     }
 
-    /** `canvas` is y-down in page units. */
-    fun draw(elements: List<PageElement>, pkg: NotebookPackage?, canvas: Canvas, skip: String? = null) {
+    /**
+     * Images go between the paper and the ink (ink is always on top of them); text boxes
+     * stay above the ink. Draws images into the region of a page bitmap starting at pixel
+     * (ox, oy) at `scale` pixels per page unit.
+     */
+    fun drawImages(elements: List<PageElement>, pkg: NotebookPackage?, bitmap: Bitmap, scale: Float, ox: Float, oy: Float,
+                   skip: String? = null) {
+        if (pkg == null || elements.none { it.kind == PageElement.Kind.IMAGE && it.id != skip }) return
+        val canvas = Canvas(bitmap)
+        canvas.translate(-ox, -oy)
+        canvas.scale(scale, scale)
+        draw(elements, pkg, canvas, skip, PageElement.Kind.IMAGE)
+    }
+
+    /** `canvas` is y-down in page units. `kind` limits drawing to text boxes or images. */
+    fun draw(elements: List<PageElement>, pkg: NotebookPackage?, canvas: Canvas, skip: String? = null,
+             kind: PageElement.Kind? = null) {
         val paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
         for (e in elements) {
-            if (e.id == skip) continue
+            if (e.id == skip || (kind != null && e.kind != kind)) continue
             val f = e.frame
             val rect = RectF(f.x.toFloat(), f.y.toFloat(), (f.x + f.width).toFloat(), (f.y + f.height).toFloat())
             when (e.kind) {
@@ -277,11 +292,12 @@ object PageImageRenderer {
         val pixelHeight = maxOf(1, (page.size.height * scale).roundToInt())
         val bitmap = Bitmap.createBitmap(maxOf(1, pixelWidth), pixelHeight, Bitmap.Config.ARGB_8888)
         drawBackground(page, pdf, bitmap, scale, 0f, 0f)
+        ElementDrawing.drawImages(page.elements, pkg, bitmap, scale, 0f, 0f)
         drawInk(bitmap, scale)
-        if (page.elements.isNotEmpty()) {
+        if (page.elements.any { it.kind == PageElement.Kind.TEXT }) {
             val canvas = Canvas(bitmap)
             canvas.scale(scale, scale)
-            ElementDrawing.draw(page.elements, pkg, canvas)
+            ElementDrawing.draw(page.elements, pkg, canvas, kind = PageElement.Kind.TEXT)
         }
         return bitmap
     }
@@ -312,8 +328,9 @@ object NotebookPdfExporter {
                     canvas.drawColor(PaperRenderer.color(page.paper))
                     PaperRenderer.draw(page.paper, page.size, canvas)
                 }
+                ElementDrawing.draw(page.elements, pkg, canvas, kind = PageElement.Kind.IMAGE)
                 inkPages[page.id]?.let { drawOutlines(it.exportSvg(), canvas) }
-                ElementDrawing.draw(page.elements, pkg, canvas)
+                ElementDrawing.draw(page.elements, pkg, canvas, kind = PageElement.Kind.TEXT)
                 doc.finishPage(pdfPage)
             }
             out.parentFile?.mkdirs()

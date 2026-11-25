@@ -228,6 +228,8 @@ class CanvasView(context: Context, private val model: EditorModel, private val h
         var previewDirtyAt = 0L
         var previewRequested = false
         var disposed = false
+        /** Image being dragged: left out of the tiles so it is not drawn twice. */
+        var lifted: String? = null
         val pdfIndex get() = page.background.pdfPageIndex
 
         fun pixelW() = ceil(page.size.width * scale).toInt()
@@ -303,6 +305,7 @@ class CanvasView(context: Context, private val model: EditorModel, private val h
             } else {
                 PageImageRenderer.drawBackground(page, null, bmp, scale, r.left.toFloat(), r.top.toFloat())
             }
+            ElementDrawing.drawImages(page.elements, model.pkg, bmp, scale, r.left.toFloat(), r.top.toFloat(), lifted)
             ink.renderOver(bmp, scale, -r.left.toFloat(), -r.top.toFloat())
             t.valid = true
         }
@@ -315,14 +318,17 @@ class CanvasView(context: Context, private val model: EditorModel, private val h
                 return
             }
             t.requested = t.version
-            workers.submit(TileJob(this, t, t.version, scale, r, snapshot.retain(), t.background, priority, settings.gpuRendering))
+            workers.submit(TileJob(this, t, t.version, scale, r, snapshot.retain(), t.background, priority, settings.gpuRendering,
+                lifted))
         }
 
         fun requestPreview(snapshot: InkSnapshot) {
             previewRequested = true
             previewDirtyAt = 0
             val w = min(480, max(64, (page.size.width * layoutScale * 0.5f).toInt()))
-            workers.submit(PreviewJob(this, page.copy(elements = emptyList()), w, snapshot.retain()))
+            // Images sit under the ink, so the preview has them too; text boxes are drawn live on top.
+            val images = page.elements.filter { it.kind == PageElement.Kind.IMAGE && it.id != lifted }
+            workers.submit(PreviewJob(this, page.copy(elements = images), w, snapshot.retain()))
         }
 
         /** Redraws only `pageRect` (page units) of an already rendered tile. */
@@ -344,6 +350,7 @@ class CanvasView(context: Context, private val model: EditorModel, private val h
             } else {
                 PageImageRenderer.drawBackground(page, null, part, scale, px.left.toFloat(), px.top.toFloat())
             }
+            ElementDrawing.drawImages(page.elements, model.pkg, part, scale, px.left.toFloat(), px.top.toFloat(), lifted)
             ink.renderOver(part, scale, -px.left.toFloat(), -px.top.toFloat())
             Canvas(bmp).drawBitmap(part, Rect(0, 0, px.width(), px.height()),
                 Rect(px.left - r.left, px.top - r.top, px.right - r.left, px.bottom - r.top), clearPaint)
@@ -366,13 +373,14 @@ class CanvasView(context: Context, private val model: EditorModel, private val h
         }
     }
 
-    /** Renders one tile on a worker: background (paper / PDF) + ink from the snapshot. */
+    /** Renders one tile on a worker: background (paper / PDF) + images + ink from the snapshot. */
     private inner class TileJob(
         val s: PageState, val t: Tile, val version: Int, val scale: Float, val r: Rect,
-        val snapshot: InkSnapshot, val background: Bitmap?, priority: Float, val gpu: Boolean,
+        val snapshot: InkSnapshot, val background: Bitmap?, priority: Float, val gpu: Boolean, val lifted: String?,
     ) : TileWorkers.Job(s, priority) {
         private val page = s.page
         private val pdf = model.pdf
+        private val pkg = model.pkg
 
         override fun render(): () -> Unit {
             var bmp: Bitmap? = null
@@ -392,6 +400,8 @@ class CanvasView(context: Context, private val model: EditorModel, private val h
                 } else {
                     PageImageRenderer.drawBackground(page, null, out, scale, r.left.toFloat(), r.top.toFloat())
                 }
+                // Images under the ink: the pen always writes on top of a photo.
+                ElementDrawing.drawImages(page.elements, pkg, out, scale, r.left.toFloat(), r.top.toFloat(), lifted)
                 // GPU on this worker's own GL context when possible, the CPU rasterizer otherwise.
                 if (!(gpu && GpuTiles.renderOver(snapshot, out, scale, -r.left.toFloat(), -r.top.toFloat())))
                     snapshot.renderOver(out, scale, -r.left.toFloat(), -r.top.toFloat())
@@ -420,9 +430,10 @@ class CanvasView(context: Context, private val model: EditorModel, private val h
     private inner class PreviewJob(val s: PageState, val page: NotebookPage, val width: Int, val snapshot: InkSnapshot) :
         TileWorkers.Job(s, Float.MAX_VALUE / 2) {
         private val pdf = model.pdf
+        private val pkg = model.pkg
 
         override fun render(): () -> Unit = try {
-            val bmp = PageImageRenderer.image(page, snapshot, pdf, null, width)
+            val bmp = PageImageRenderer.image(page, snapshot, pdf, pkg, width)
             ({ deliverPreview(s, bmp) })
         } finally {
             snapshot.release()
@@ -693,12 +704,12 @@ class CanvasView(context: Context, private val model: EditorModel, private val h
                         vr.left + (r.left + bmp.width) / s.scale * k, vr.top + (r.top + bmp.height) / s.scale * k), p)
                 }
             }
-            // Text boxes and images.
+            // Text boxes (images are in the tiles, under the ink) and the element being dragged.
             if (page.elements.isNotEmpty()) {
                 canvas.save()
                 canvas.translate(vr.left, vr.top)
                 canvas.scale(k, k)
-                ElementDrawing.draw(page.elements, model.pkg, canvas, skip = dragElement?.id)
+                ElementDrawing.draw(page.elements, model.pkg, canvas, skip = dragElement?.id, kind = PageElement.Kind.TEXT)
                 dragElement?.takeIf { e -> page.elements.any { it.id == e.id } && activePage === s }?.let { e ->
                     canvas.save()
                     canvas.translate(dragDelta.first, dragDelta.second)
@@ -1244,8 +1255,16 @@ class CanvasView(context: Context, private val model: EditorModel, private val h
         dragStart = px to py
         dragDelta = 0f to 0f
         tapView = vx to vy
+        if (element.kind == PageElement.Kind.IMAGE) activePage?.let { s ->
+            // Lift the image out of the tiles while it follows the finger.
+            s.lifted = element.id
+            refreshNow(s, elementRect(element), immediate = true)
+        }
         invalidate()
     }
+
+    private fun elementRect(e: PageElement) = RectF(e.frame.x.toFloat(), e.frame.y.toFloat(),
+        (e.frame.x + e.frame.width).toFloat(), (e.frame.y + e.frame.height).toFloat())
 
     private fun elementAt(page: NotebookPage, x: Float, y: Float): PageElement? = page.elements.lastOrNull { e ->
         x >= e.frame.x && x <= e.frame.x + e.frame.width && y >= e.frame.y - 4 && y <= e.frame.y + e.frame.height + 4
@@ -1426,6 +1445,10 @@ class CanvasView(context: Context, private val model: EditorModel, private val h
                 val (dx, dy) = dragDelta
                 val moved = hypot(e.getX(i) - tapView.first, e.getY(i) - tapView.second) > touchSlop
                 dragElement = null
+                if (s.lifted != null) {
+                    s.lifted = null
+                    if (element != null) refreshNow(s, elementRect(element), immediate = true)
+                }
                 if (element != null && !cancelled) {
                     if (moved) {
                         model.updateElement(element.copy(frame = element.frame.copy(x = element.frame.x + dx, y = element.frame.y + dy)), s.page.id)
@@ -1707,7 +1730,20 @@ class CanvasView(context: Context, private val model: EditorModel, private val h
     }
 
     override fun elementsDidChange(pageId: String) {
-        states[pageId]?.let { s -> model.document.pages.firstOrNull { it.id == pageId }?.let { s.page = it } }
+        states[pageId]?.let { s ->
+            model.document.pages.firstOrNull { it.id == pageId }?.let { newPage ->
+                val old = s.page.elements.filter { it.kind == PageElement.Kind.IMAGE }
+                val new = newPage.elements.filter { it.kind == PageElement.Kind.IMAGE }
+                s.page = newPage
+                // Images live in the tiles: redraw wherever one appeared, moved or went away.
+                var dirty: RectF? = null
+                for (e in (old - new.toSet()) + (new - old.toSet())) {
+                    dirty = dirty?.apply { union(elementRect(e)) } ?: elementRect(e)
+                }
+                if (old.map { it.id } != new.map { it.id } && dirty == null) dirty = new.fold(RectF()) { r, e -> r.apply { union(elementRect(e)) } }
+                dirty?.let { refreshNow(s, it, immediate = true) }
+            }
+        }
         invalidate()
     }
 
