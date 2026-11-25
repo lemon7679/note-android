@@ -82,6 +82,23 @@ data class PaperStyle(
 data class PageSize(val width: Double, val height: Double) {
     val landscape: PageSize get() = PageSize(maxOf(width, height), minOf(width, height))
     val portrait: PageSize get() = PageSize(minOf(width, height), maxOf(width, height))
+
+    val widthMm: Double get() = width * 25.4 / 72
+    val heightMm: Double get() = height * 25.4 / 72
+
+    /** "210 × 297 mm". */
+    val millimeterLabel: String get() = "%.0f × %.0f mm".format(java.util.Locale.ROOT, Math.round(widthMm).toDouble(), Math.round(heightMm).toDouble())
+
+    companion object {
+        /** Allowed side length of a custom page, in millimeters. */
+        val CUSTOM_RANGE_MM = 50.0..1200.0
+
+        /** A custom page size from millimeters, each side clamped to [CUSTOM_RANGE_MM]. */
+        fun millimeters(width: Double, height: Double): PageSize {
+            fun side(v: Double) = (if (v.isFinite()) v else 0.0).coerceIn(CUSTOM_RANGE_MM) * 72.0 / 25.4
+            return PageSize(side(width), side(height))
+        }
+    }
 }
 
 /** Page size presets in points (portrait). */

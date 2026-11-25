@@ -21,6 +21,7 @@ import com.lemon7679.note.core.PaperStyle
 import com.lemon7679.note.core.PaperTemplate
 import com.lemon7679.note.core.SyncProgress
 import com.lemon7679.note.core.SyncReport
+import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import java.io.File
 import java.security.KeyStore
@@ -79,6 +80,16 @@ data class OpenDocument(val ref: LibraryRef, val file: File, val kind: Kind, val
     val id: String get() = ref.id + if (isRemoteCopy) "#remote" else ""
 }
 
+/** What a click of the stylus side button (S Pen button) does while the pen hovers. */
+@Serializable
+enum class StylusButtonAction(val label: String) {
+    /** Opens the tool wheel (tools, colors, width, pen settings) at the pen tip. */
+    @SerialName("wheel") WHEEL("휠 메뉴"),
+    /** Switches between the eraser and the last pen. */
+    @SerialName("eraser") ERASER("지우개 전환"),
+    @SerialName("none") NONE("사용 안 함"),
+}
+
 /** App-wide preferences. */
 @Serializable
 data class AppSettings(
@@ -88,6 +99,8 @@ data class AppSettings(
     val tapGesturesUndo: Boolean = true,
     /** 낙서로 지우기: scribbling back and forth over ink with the pen erases it. */
     val scribbleToErase: Boolean = true,
+    /** Stylus button click while hovering (holding it while drawing always erases). */
+    val stylusButtonAction: StylusButtonAction = StylusButtonAction.WHEEL,
     /** Render ink with the GPU (OpenGL ES 3): page tiles on worker threads and the stroke being
      *  drawn on a low-latency front buffer. Falls back to the CPU where unsupported. */
     val gpuRendering: Boolean = true,

@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -48,6 +49,7 @@ import androidx.compose.material.icons.outlined.Sync
 import androidx.compose.material.icons.outlined.TabletAndroid
 import androidx.compose.material.icons.outlined.Warning
 import androidx.compose.material.icons.outlined.Menu
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -68,6 +70,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
@@ -79,6 +82,7 @@ import com.lemon7679.note.app.AppModel
 import com.lemon7679.note.app.LibraryLocation
 import com.lemon7679.note.app.LibraryRef
 import com.lemon7679.note.app.LibrarySource
+import com.lemon7679.note.app.StylusButtonAction
 import com.lemon7679.note.app.libraryDateLabel
 import com.lemon7679.note.app.relativeLabel
 import com.lemon7679.note.core.ConflictResolution
@@ -140,6 +144,13 @@ fun NoteSheet(
     }
 }
 
+@Composable
+private fun MillimeterField(label: String, value: String, modifier: Modifier = Modifier, onChange: (String) -> Unit) {
+    OutlinedTextField(value, { v -> onChange(v.filter { it.isDigit() || it == '.' || it == ',' }.take(6)) },
+        label = { Text(label) }, suffix = { Text("mm") }, singleLine = true, modifier = modifier,
+        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal))
+}
+
 enum class NewItemMode(val title: String) { NOTEBOOK("빈 노트"), PDF("PDF 가져오기"), FOLDER("폴더") }
 
 /** "새로 만들기" sheet (design: NewNotebook artboard). */
@@ -152,9 +163,13 @@ fun NewItemSheet(app: AppModel, location: LibraryLocation, initial: NewItemMode,
     var cover by remember { mutableStateOf<String?>(CoverStyle.palette[0]) }
     var template by remember { mutableStateOf(app.settings.defaultTemplate) }
     var paperColor by remember { mutableStateOf(app.settings.defaultPaperColor) }
-    var size by remember { mutableStateOf(app.settings.defaultSize) }
+    /** null = 직접 입력 (custom millimeters). */
+    var size by remember { mutableStateOf<PageSizePreset?>(app.settings.defaultSize) }
     var landscape by remember { mutableStateOf(app.settings.defaultLandscape) }
-    val pageSize = if (landscape) size.size.landscape else size.size.portrait
+    var customWidth by remember { mutableStateOf("210") }
+    var customHeight by remember { mutableStateOf("297") }
+    val pageSize = size?.let { if (landscape) it.size.landscape else it.size.portrait }
+        ?: PageSize.millimeters(customWidth.replace(',', '.').toDoubleOrNull() ?: 0.0, customHeight.replace(',', '.').toDoubleOrNull() ?: 0.0)
 
     fun create() {
         when (mode) {
@@ -183,10 +198,11 @@ fun NewItemSheet(app: AppModel, location: LibraryLocation, initial: NewItemMode,
                 val preview: @Composable () -> Unit = {
                     Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(18.dp),
                         modifier = Modifier.padding(20.dp)) {
-                        Box(Modifier.width(150.dp).height(206.dp)) {
+                        Box(Modifier.width(150.dp).height(206.dp), contentAlignment = Alignment.Center) {
                             val hex = cover
                             if (hex != null) NotebookCover(title.ifBlank { "새 노트" }, hex, Modifier.fillMaxSize())
-                            else Box(Modifier.fillMaxSize().clip(RoundedCornerShape(4.dp)).border(1.dp, c.separator, RoundedCornerShape(4.dp))) {
+                            else Box(Modifier.aspectRatio((pageSize.width / pageSize.height).toFloat()).clip(RoundedCornerShape(4.dp))
+                                .border(1.dp, c.separator, RoundedCornerShape(4.dp))) {
                                 PaperPreview(PaperStyle(template, paperColor), pageSize, Modifier.fillMaxSize())
                             }
                         }
@@ -216,13 +232,44 @@ fun NewItemSheet(app: AppModel, location: LibraryLocation, initial: NewItemMode,
                             PaperTemplateGrid(template, paperColor) { template = it }
                         }
                         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                            SectionLabel("크기")
-                            val sizes = listOf(PageSizePreset.A4, PageSizePreset.B5, PageSizePreset.LETTER, PageSizePreset.A5)
-                            SegmentedPicker(sizes.map { it.displayName }, sizes.indexOf(size).coerceAtLeast(0)) { size = sizes[it] }
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                SectionLabel("크기")
+                                Spacer(Modifier.weight(1f))
+                                Text(pageSize.millimeterLabel, style = NoteTheme.Fonts.caption, color = c.textSecondary)
+                            }
+                            val sizes = listOf(PageSizePreset.A4, PageSizePreset.B5, PageSizePreset.A5, PageSizePreset.LETTER, PageSizePreset.SCREEN)
+                            SegmentedPicker(sizes.map { it.displayName } + (if (wide) "직접 입력" else "직접"),
+                                size?.let { sizes.indexOf(it).coerceAtLeast(0) } ?: sizes.size) { i ->
+                                val previous = pageSize
+                                size = sizes.getOrNull(i)
+                                if (size == null) {
+                                    // Start the custom size from the size that was showing.
+                                    customWidth = "%.0f".format(java.util.Locale.ROOT, Math.round(previous.widthMm).toDouble())
+                                    customHeight = "%.0f".format(java.util.Locale.ROOT, Math.round(previous.heightMm).toDouble())
+                                }
+                            }
+                            if (size == null) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    MillimeterField("너비", customWidth, Modifier.weight(1f)) { customWidth = it }
+                                    Text("×", color = c.iconMuted, modifier = Modifier.padding(horizontal = 10.dp))
+                                    MillimeterField("높이", customHeight, Modifier.weight(1f)) { customHeight = it }
+                                }
+                                Text("한 변 ${PageSize.CUSTOM_RANGE_MM.start.toInt()}–${PageSize.CUSTOM_RANGE_MM.endInclusive.toInt()} mm",
+                                    style = NoteTheme.Fonts.caption, color = c.textSecondary)
+                            }
                         }
                         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                             SectionLabel("방향")
-                            SegmentedPicker(listOf("세로", "가로"), if (landscape) 1 else 0) { landscape = it == 1 }
+                            SegmentedPicker(listOf("세로", "가로"), if (pageSize.width > pageSize.height) 1 else 0) { i ->
+                                landscape = i == 1
+                                val w = customWidth.replace(',', '.').toDoubleOrNull() ?: 0.0
+                                val h = customHeight.replace(',', '.').toDoubleOrNull() ?: 0.0
+                                if (size == null && (w > h) != landscape) {
+                                    val t = customWidth
+                                    customWidth = customHeight
+                                    customHeight = t
+                                }
+                            }
                         }
                         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                             SectionLabel("종이 색")
@@ -600,6 +647,17 @@ fun SettingsScreen(app: AppModel, onEditAccount: (NasAccount) -> Unit, onDismiss
                 CardDivider()
                 Box(Modifier.padding(horizontal = 16.dp)) {
                     OptionToggle("낙서로 지우기", s.scribbleToErase, "펜으로 글씨 위를 여러 번 왔다 갔다 문지르면 그 아래 필기가 지워집니다.") { v -> app.updateSettings { it.copy(scribbleToErase = v) } }
+                }
+                CardDivider()
+                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("펜 버튼 (S펜 버튼 클릭)", style = NoteTheme.Fonts.body, color = c.textPrimary)
+                    SegmentedPicker(StylusButtonAction.entries.map { it.label }, s.stylusButtonAction.ordinal) { i ->
+                        app.updateSettings { it.copy(stylusButtonAction = StylusButtonAction.entries[i]) }
+                    }
+                    Text("펜을 화면 가까이 띄운 채 버튼을 누르면 펜 끝에 도구 · 색 · 굵기 · 펜 설정 휠이 열립니다. " +
+                        "버튼을 누른 채 쓰면 지금처럼 지워집니다. 갤럭시에서 에어 커맨드가 대신 열리면 " +
+                        "설정 › 유용한 기능 › S펜 › 에어 커맨드에서 \"펜 버튼으로 열기\"를 끄세요.",
+                        style = NoteTheme.Fonts.caption, color = c.textSecondary)
                 }
                 CardDivider()
                 Box(Modifier.padding(horizontal = 16.dp)) {

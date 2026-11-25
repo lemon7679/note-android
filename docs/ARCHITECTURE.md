@@ -64,7 +64,9 @@ CanvasView (페이지 세로 배치, 0.5–5× 확대, 손가락 스크롤/핀�
 - PDF 배경은 타일별로 캐시해 잉크만 바뀔 때 PDF를 다시 그리지 않습니다.
 - 입력: `MotionEvent`의 과거 샘플 전부(240 Hz급), 필압, `AXIS_TILT` → 고도, `orientation` → 방위, `requestUnbufferedDispatch`.
   스타일러스는 항상 그리고, 손가락은 설정에 따라 스크롤/확대 또는 필기. 그리는 중 다른 손가락 = 완벽한 도형.
-  스타일러스 지우개 끝(`TOOL_TYPE_ERASER`)이나 옆 버튼 = 지우개(iPad의 Pencil 더블 탭 대응).
+  스타일러스 지우개 끝(`TOOL_TYPE_ERASER`)이나 옆 버튼을 누른 채 쓰기 = 지우개.
+  펜을 띄운 채(호버) 옆 버튼을 눌렀다 떼면 `CanvasHost.stylusButtonClicked` → 펜 끝에 `ToolWheel`(iPad의 Pencil 더블 탭 · 스퀴즈 대응).
+  Android 14+의 `KEYCODE_STYLUS_BUTTON_*` 키 이벤트도 같은 클릭으로 받습니다.
 - 올가미 이동: 선택한 획을 `setHidden`으로 타일에서 빼고 `renderStrokesOver`로 떠 있는 비트맵에 그려 따라가게 한 뒤,
   놓을 때 `transform` 한 번(실행 취소 1단계)으로 확정.
 

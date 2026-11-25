@@ -86,6 +86,15 @@ class StorageTest {
         assertTrue(trash.entries().isEmpty())
     }
 
+    @Test fun customPageSizeInMillimeters() {
+        val a4 = PageSize.millimeters(210.0, 297.0)
+        assertEquals(PageSizePreset.A4.size.width, a4.width, 0.01)
+        assertEquals("210 × 297 mm", a4.millimeterLabel)
+        val clamped = PageSize.millimeters(1.0, 5000.0)
+        assertEquals(50.0, clamped.widthMm, 1e-9)
+        assertEquals(1200.0, clamped.heightMm, 1e-9)
+    }
+
     @Test fun pathsAndNames() {
         assertEquals("/a/b", RemotePath.normalize("a//b/./c/.."))
         assertEquals("/a/b", RemotePath.join("/a/", "b/"))

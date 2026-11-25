@@ -16,6 +16,7 @@ import android.graphics.RectF
 import android.os.SystemClock
 import android.view.Choreographer
 import android.view.HapticFeedbackConstants
+import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.VelocityTracker
 import android.view.View
@@ -59,6 +60,8 @@ interface CanvasHost {
     fun elementTapped(pageId: String, element: PageElement, anchor: RectF)
     fun pasteMenu(anchor: RectF)
     fun toolChanged()
+    /** The stylus side button was clicked while the pen hovered at ([x], [y]) view px (null = position unknown). */
+    fun stylusButtonClicked(x: Float?, y: Float?) {}
 }
 
 /**
@@ -931,6 +934,78 @@ class CanvasView(context: Context, private val model: EditorModel, private val h
 
     // ------------------------------------------------------------------ input
 
+    // Stylus side button: a click while hovering opens the tool wheel (or toggles the eraser);
+    // holding it while the pen touches the screen erases (see isEraserInput).
+    private val stylusButtons = MotionEvent.BUTTON_STYLUS_PRIMARY or MotionEvent.BUTTON_STYLUS_SECONDARY or MotionEvent.BUTTON_SECONDARY
+    private var stylusButtonDown = false
+    private var stylusButtonDownAt = 0L
+    /** The pen touched the screen while the button was held (an erase, not a click). */
+    private var stylusButtonUsed = false
+    private var hoverPoint: Pair<Float, Float>? = null
+
+    private val stylusKeyListener = View.OnUnhandledKeyEventListener { _, event -> onStylusKey(event) }
+
+    override fun onAttachedToWindow() {
+        super.onAttachedToWindow()
+        addOnUnhandledKeyEventListener(stylusKeyListener)
+    }
+
+    override fun onDetachedFromWindow() {
+        removeOnUnhandledKeyEventListener(stylusKeyListener)
+        super.onDetachedFromWindow()
+    }
+
+    /** Android 14+ can report stylus buttons as key events instead of motion button state. */
+    private fun onStylusKey(event: KeyEvent): Boolean {
+        val code = event.keyCode
+        if (code != KeyEvent.KEYCODE_STYLUS_BUTTON_PRIMARY && code != KeyEvent.KEYCODE_STYLUS_BUTTON_SECONDARY) return false
+        if (event.action == KeyEvent.ACTION_UP && !event.isCanceled && mode == Mode.IDLE) stylusButtonClick()
+        return true
+    }
+
+    private fun stylusButtonClick() {
+        if (disposed || model.closed) return
+        performHapticFeedback(HapticFeedbackConstants.CONTEXT_CLICK)
+        val p = hoverPoint
+        host.stylusButtonClicked(p?.first, p?.second)
+    }
+
+    /** Button transitions seen while the pen hovers: press then release without touching = a click. */
+    private fun trackStylusButton(e: MotionEvent) {
+        if (e.pointerCount == 0 || !isStylus(e, 0)) return
+        if (e.actionMasked == MotionEvent.ACTION_HOVER_EXIT) {
+            hoverPoint = null
+        } else {
+            hoverPoint = e.x to e.y
+        }
+        val pressed = (e.buttonState and stylusButtons) != 0
+        if (pressed && !stylusButtonDown) {
+            stylusButtonDown = true
+            stylusButtonDownAt = e.eventTime
+            stylusButtonUsed = false
+        } else if (!pressed && stylusButtonDown) {
+            stylusButtonDown = false
+            if (!stylusButtonUsed && e.eventTime - stylusButtonDownAt < 1000 && mode == Mode.IDLE) stylusButtonClick()
+        }
+    }
+
+    override fun onHoverEvent(e: MotionEvent): Boolean {
+        if (e.pointerCount > 0 && isStylus(e, 0)) {
+            trackStylusButton(e)
+            return true
+        }
+        return super.onHoverEvent(e)
+    }
+
+    override fun onGenericMotionEvent(e: MotionEvent): Boolean {
+        val a = e.actionMasked
+        if ((a == MotionEvent.ACTION_BUTTON_PRESS || a == MotionEvent.ACTION_BUTTON_RELEASE) && e.pointerCount > 0 && isStylus(e, 0)) {
+            trackStylusButton(e)
+            return true
+        }
+        return super.onGenericMotionEvent(e)
+    }
+
     private fun isStylus(e: MotionEvent, i: Int): Boolean {
         val t = e.getToolType(i)
         return t == MotionEvent.TOOL_TYPE_STYLUS || t == MotionEvent.TOOL_TYPE_ERASER
@@ -967,6 +1042,14 @@ class CanvasView(context: Context, private val model: EditorModel, private val h
     @SuppressLint("ClickableViewAccessibility")
     override fun onTouchEvent(e: MotionEvent): Boolean {
         if (disposed || model.closed) return false
+        // The pen touched the screen: a held side button is now an erase, never a wheel click.
+        for (k in 0 until e.pointerCount) {
+            if (isStylus(e, k)) {
+                if ((e.buttonState and stylusButtons) != 0) stylusButtonDown = true
+                if (stylusButtonDown) stylusButtonUsed = true
+                if (e.actionMasked != MotionEvent.ACTION_UP) hoverPoint = e.getX(k) to e.getY(k)
+            }
+        }
         when (e.actionMasked) {
             MotionEvent.ACTION_DOWN, MotionEvent.ACTION_POINTER_DOWN -> pointerDown(e, e.actionIndex)
             MotionEvent.ACTION_MOVE -> move(e)
