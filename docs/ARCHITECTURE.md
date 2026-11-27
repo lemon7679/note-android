@@ -70,6 +70,20 @@ CanvasView (페이지 세로 배치, 0.5–5× 확대, 손가락 스크롤/핀�
 - 올가미 이동: 선택한 획을 `setHidden`으로 타일에서 빼고 `renderStrokesOver`로 떠 있는 비트맵에 그려 따라가게 한 뒤,
   놓을 때 `transform` 한 번(실행 취소 1단계)으로 확정.
 
+## 작업 공간 (분할 화면 · 떠 있는 창, `app/Workspace.kt`, `ui/WorkspaceScreen.kt`)
+
+iPad와 같은 규칙입니다. `AppModel.panes`(나란히 1–2개, 폭 600dp 미만이면 위아래), `floating`(최대 3개, 위치 · 크기 dp,
+최소화, z 순서), `focusedDocumentId`(마지막으로 만진 창 — 뒤로 가기가 이 창을 닫음), `DocumentPlacement`(main · replacing ·
+beside · floating). 이미 열린 문서는 그 창을 앞으로 가져옵니다.
+
+- `DocumentSessions`가 `EditorModel`을 갖고 있어 문서가 다른 창으로 옮겨도 모델(페이지 · 실행 취소)은 그대로이고,
+  `CanvasView`만 새로 만듭니다. 옛 캔버스는 `AndroidView(onRelease)`에서 `dispose`(작업 스레드 · 타일 해제)하며,
+  새 캔버스가 이미 `model.canvas`를 가졌으면 건드리지 않습니다. 문서를 닫을 때는 캔버스를 먼저 멈춘 뒤 모델을 닫습니다.
+- 실시간 획 레이어(`LiveInkLayer`)는 창 전체 위에 뜨는 SurfaceView라, 떠 있는 창이 보이는 동안 분할 창의 캔버스는 쓰지 않고
+  (뷰 안 오버레이로 그림) 맨 앞의 떠 있는 창만 씁니다(`CanvasView.liveLayerAllowed`).
+- S펜 버튼 키 이벤트는 펜이 떠 있는 캔버스가 받습니다(노트가 둘 이상이면 호버 중이 아닌 캔버스는 넘김).
+- PDF 뷰어는 보던 쪽 번호를 세션에 남겨, 다른 창으로 옮겨도 같은 쪽에서 다시 시작합니다.
+
 ## 편집 모델 · 저장 · 동기화
 
 iPad와 같습니다: 페이지 잉크는 필요할 때 `pages/<id>.ink`에서 불러오고, 실행 취소는 "어느 페이지를 고쳤는지" 스택과

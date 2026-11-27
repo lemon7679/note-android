@@ -51,6 +51,7 @@ import androidx.compose.material.icons.automirrored.outlined.FormatAlignLeft
 import androidx.compose.material.icons.automirrored.outlined.NoteAdd
 import androidx.compose.material.icons.automirrored.outlined.Redo
 import androidx.compose.material.icons.automirrored.outlined.Undo
+import androidx.compose.material.icons.automirrored.outlined.MenuBook
 import androidx.compose.material.icons.filled.Bookmark
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.outlined.RadioButtonUnchecked
@@ -59,6 +60,7 @@ import androidx.compose.material.icons.outlined.AutoFixHigh
 import androidx.compose.material.icons.outlined.BookmarkBorder
 import androidx.compose.material.icons.outlined.BorderColor
 import androidx.compose.material.icons.outlined.ChevronLeft
+import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.ContentCopy
 import androidx.compose.material.icons.outlined.ContentCut
 import androidx.compose.material.icons.outlined.ContentPaste
@@ -123,7 +125,15 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.lemon7679.note.app.AppModel
+import com.lemon7679.note.app.DocumentPlacement
 import com.lemon7679.note.app.OpenDocument
+import com.lemon7679.note.app.PaneRole
+import com.lemon7679.note.app.backTargetId
+import com.lemon7679.note.app.closeDocument
+import com.lemon7679.note.app.closeWorkspace
+import com.lemon7679.note.app.openDocumentCount
+import com.lemon7679.note.ui.FloatingHeader
+import com.lemon7679.note.ui.WindowMenuButton
 import com.lemon7679.note.app.PageLayout
 import com.lemon7679.note.app.StylusButtonAction
 import com.lemon7679.note.core.CoverStyle
@@ -153,20 +163,23 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlin.math.roundToInt
 
-/** Loads a notebook and shows the editor (or why it could not be opened). */
+/**
+ * Loads a notebook and shows the editor (or why it could not be opened). The workspace keeps
+ * the editor model while the notebook moves between panes and floating windows.
+ */
 @Composable
-fun NotebookEditorHost(app: AppModel, doc: OpenDocument) {
+fun NotebookEditorHost(app: AppModel, doc: OpenDocument, role: PaneRole = PaneRole.SINGLE, liveInkAllowed: Boolean = true) {
     val c = NoteTheme.colors
-    val result = remember(doc.id) { runCatching { EditorModel(app, doc.ref, doc.file) } }
+    val result = remember(doc.id) { app.sessions.editor(app, doc) } ?: return
     val model = result.getOrNull()
     if (model != null) {
-        NotebookEditor(app, model)
+        NotebookEditor(app, model, role, liveInkAllowed)
     } else {
-        BackHandler { app.documentClosed(doc) }
+        BackHandler(app.backTargetId == doc.id) { app.closeDocument(doc.id) }
         Column(Modifier.fillMaxSize().background(c.background).padding(40.dp), horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.spacedBy(16.dp, Alignment.CenterVertically)) {
             Text("노트를 열 수 없습니다.\n${result.exceptionOrNull()?.message ?: ""}", style = NoteTheme.Fonts.body, color = c.textPrimary)
-            PrimaryButton("라이브러리로 돌아가기") { app.documentClosed(doc) }
+            PrimaryButton(if (role.closesWorkspace) "라이브러리로 돌아가기" else "닫기") { app.closeDocument(doc.id) }
         }
     }
 }
@@ -186,7 +199,7 @@ private data class TextRequest(val pageId: String, val element: PageElement?, va
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-fun NotebookEditor(app: AppModel, model: EditorModel) {
+fun NotebookEditor(app: AppModel, model: EditorModel, role: PaneRole = PaneRole.SINGLE, liveInkAllowed: Boolean = true) {
     val c = NoteTheme.colors
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -244,11 +257,15 @@ fun NotebookEditor(app: AppModel, model: EditorModel) {
         }
     }
 
+    // The library button closes everything; the right pane / a window closes only itself.
     fun close() {
-        canvas?.dispose()
-        model.close()
+        if (role.closesWorkspace) app.closeWorkspace() else app.closeDocument(model.documentId)
     }
-    BackHandler { if (menusHidden) menusHidden = false else close() }
+    // Back closes the pane or window last touched (all of them one by one, then the library).
+    BackHandler(app.backTargetId == model.documentId) {
+        if (menusHidden) menusHidden = false else app.closeDocument(model.documentId)
+    }
+    LaunchedEffect(role) { if (role != PaneRole.SINGLE) menusHidden = false }
     // Full screen also hides the status and navigation bars (a swipe from the edge shows them briefly).
     val view = LocalView.current
     DisposableEffect(menusHidden) {
@@ -276,8 +293,17 @@ fun NotebookEditor(app: AppModel, model: EditorModel) {
         BoxWithConstraints(Modifier.fillMaxWidth()) {
             val compact = maxWidth < 700.dp
             if (showSidebar == null) showSidebar = !compact
+            // Becoming narrow (half of the split screen) hides the page list once; the button brings it back.
+            var wasCompact by remember { mutableStateOf(compact) }
+            if (compact != wasCompact) {
+                if (compact) showSidebar = false
+                wasCompact = compact
+            }
             Column {
-                TopBar(app, model, compact, showSidebar == true, onSidebar = { showSidebar = showSidebar != true },
+                if (role == PaneRole.FLOATING) FloatingHeader(app, model.documentId, model.title, Icons.AutoMirrored.Outlined.MenuBook) {
+                    NoteIconButton(Icons.AutoMirrored.Outlined.Undo, "실행 취소", enabled = model.canUndo) { model.undo() }
+                    NoteIconButton(Icons.AutoMirrored.Outlined.Redo, "다시 실행", enabled = model.canRedo) { model.redo() }
+                } else TopBar(app, model, role, compact, showSidebar == true, onSidebar = { showSidebar = showSidebar != true },
                     onClose = ::close, onPanel = { showPanel = true }, onHideMenus = { showPenSettings = false; menusHidden = true },
                     onSelectPages = { model.beginPageSelection(); showSidebar = true }, onPaper = { showPaper = true }, onRename = { renaming = true },
                     onPaste = { canvas?.paste() }, onExport = { kind ->
@@ -308,7 +334,7 @@ fun NotebookEditor(app: AppModel, model: EditorModel) {
         }
         }
         Row(Modifier.weight(1f)) {
-            AnimatedVisibility(showSidebar == true && !menusHidden) {
+            AnimatedVisibility(showSidebar == true && !menusHidden && role != PaneRole.FLOATING) {
                 PageSidebar(model) { extracting = it }
             }
             Box(Modifier.weight(1f).fillMaxHeight()) {
@@ -323,7 +349,14 @@ fun NotebookEditor(app: AppModel, model: EditorModel) {
                         }
                     }
                 }, modifier = Modifier.fillMaxSize().clipToBounds(),
-                    update = { (it.getChildAt(0) as? CanvasView)?.applySettings() })
+                    // Moving to another pane or window builds a new canvas: free this one's tiles and threads.
+                    onRelease = { (it.getChildAt(0) as? CanvasView)?.dispose() },
+                    update = {
+                        (it.getChildAt(0) as? CanvasView)?.let { view ->
+                            view.liveLayerAllowed = liveInkAllowed
+                            view.applySettings()
+                        }
+                    })
                 if (menusHidden) {
                     ShowMenusButton(Modifier.align(Alignment.TopEnd)) { menusHidden = false }
                 } else {
@@ -423,9 +456,8 @@ fun NotebookEditor(app: AppModel, model: EditorModel) {
             confirmButton = {
                 TextButton({
                     madeNotebook = null
-                    close()
-                    // Let the editor leave the screen before the new notebook opens.
-                    android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({ app.openNotebook(made) }, 300)
+                    // The new notebook takes this one's place (pane or window).
+                    app.openNotebook(made, DocumentPlacement.Replacing(model.documentId))
                 }) { Text("새 노트 열기") }
             },
             dismissButton = { TextButton({ madeNotebook = null }) { Text("계속 편집") } })
@@ -455,6 +487,7 @@ private fun MenuAction(icon: ImageVector, label: String, tint: Color? = null, on
 private fun TopBar(
     app: AppModel,
     model: EditorModel,
+    role: PaneRole,
     compact: Boolean,
     sidebar: Boolean,
     onSidebar: () -> Unit,
@@ -473,14 +506,19 @@ private fun TopBar(
     var moreMenu by remember { mutableStateOf(false) }
     var coverMenu by remember { mutableStateOf(false) }
     Row(Modifier.fillMaxWidth().height(52.dp).background(c.surface).padding(horizontal = 6.dp), verticalAlignment = Alignment.CenterVertically) {
-        Row(Modifier.clip(RoundedCornerShape(8.dp)).clickable(onClick = onClose).height(44.dp).padding(end = 6.dp),
-            verticalAlignment = Alignment.CenterVertically) {
-            Icon(Icons.Outlined.ChevronLeft, "라이브러리", tint = c.accent)
-            if (!compact) Text("라이브러리", color = c.accent, fontSize = 15.sp, fontWeight = FontWeight.Medium)
+        if (role.closesWorkspace) {
+            Row(Modifier.clip(RoundedCornerShape(8.dp)).clickable(onClick = onClose).height(44.dp).padding(end = 6.dp),
+                verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Outlined.ChevronLeft, if (app.openDocumentCount > 1) "모두 닫고 라이브러리로" else "라이브러리", tint = c.accent)
+                if (!compact) Text("라이브러리", color = c.accent, fontSize = 15.sp, fontWeight = FontWeight.Medium)
+            }
+        } else {
+            NoteIconButton(Icons.Outlined.Close, "이 창 닫기", onClick = onClose)
         }
         NoteIconButton(Icons.Outlined.ViewSidebar, "페이지 목록", isOn = sidebar, onClick = onSidebar)
+        WindowMenuButton(app, model.documentId)
         if (!compact) {
-            NoteIconButton(Icons.Outlined.Fullscreen, "메뉴 숨기기", onClick = onHideMenus)
+            if (role == PaneRole.SINGLE) NoteIconButton(Icons.Outlined.Fullscreen, "메뉴 숨기기", onClick = onHideMenus)
             val bookmarked = model.currentPage.bookmarked
             NoteIconButton(if (bookmarked) Icons.Filled.Bookmark else Icons.Outlined.BookmarkBorder, "책갈피", isOn = bookmarked) {
                 model.toggleBookmark(model.currentPageIndex)
@@ -527,8 +565,10 @@ private fun TopBar(
                         { moreMenu = false; model.toggleBookmark(model.currentPageIndex) })
                     DropdownMenuItem({ Text("검색과 책갈피") }, { moreMenu = false; onPanel() })
                 }
-                DropdownMenuItem({ Text("메뉴 숨기기 (전체 화면)") }, { moreMenu = false; onHideMenus() },
-                    leadingIcon = { Icon(Icons.Outlined.Fullscreen, null) })
+                if (role == PaneRole.SINGLE) {
+                    DropdownMenuItem({ Text("메뉴 숨기기 (전체 화면)") }, { moreMenu = false; onHideMenus() },
+                        leadingIcon = { Icon(Icons.Outlined.Fullscreen, null) })
+                }
                 DropdownMenuItem({ Text("이름 변경") }, { moreMenu = false; onRename() })
                 DropdownMenuItem({ Text("표지…") }, { moreMenu = false; coverMenu = true })
                 if (app.strokeClipboard != null) DropdownMenuItem({ Text("붙여넣기") }, { moreMenu = false; onPaste() },

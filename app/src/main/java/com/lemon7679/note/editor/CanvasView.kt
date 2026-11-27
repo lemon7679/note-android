@@ -23,6 +23,7 @@ import android.view.View
 import android.view.ViewConfiguration
 import android.widget.OverScroller
 import com.lemon7679.note.app.PageLayout
+import com.lemon7679.note.app.openNotebookCount
 import com.lemon7679.note.core.NotebookPage
 import com.lemon7679.note.core.PageElement
 import com.lemon7679.note.ink.InkAffine
@@ -127,6 +128,11 @@ class CanvasView(context: Context, private val model: EditorModel, private val h
 
     /** Front-buffered GPU layer above this view for the stroke being drawn (null = not available). */
     var liveLayer: LiveInkLayer? = null
+    /**
+     * The live layer is a surface above the whole window: off while a floating window may be
+     * over this canvas (the live stroke would show on top of the window until it is committed).
+     */
+    var liveLayerAllowed = true
     /** The current stroke is drawn on [liveLayer] instead of the in-view overlay. */
     private var gpuLive = false
     private val builder = StrokeBuilder(com.lemon7679.note.ink.BrushKind.BALLPOINT).apply { setBuiltinPrediction(true) }
@@ -540,7 +546,8 @@ class CanvasView(context: Context, private val model: EditorModel, private val h
         builder.dispose()
         liveLayer?.release()
         liveLayer = null
-        model.canvas = null
+        // A canvas for the same notebook in another pane or window may already have taken over.
+        if (model.canvas === this) model.canvas = null
     }
 
     // ------------------------------------------------------------------ layout
@@ -1014,6 +1021,8 @@ class CanvasView(context: Context, private val model: EditorModel, private val h
     private fun onStylusKey(event: KeyEvent): Boolean {
         val code = event.keyCode
         if (code != KeyEvent.KEYCODE_STYLUS_BUTTON_PRIMARY && code != KeyEvent.KEYCODE_STYLUS_BUTTON_SECONDARY) return false
+        // With notebooks side by side, the canvas the pen hovers over takes the click.
+        if (hoverPoint == null && model.app.openNotebookCount > 1) return false
         if (event.action == KeyEvent.ACTION_UP && !event.isCanceled && mode == Mode.IDLE) stylusButtonClick()
         return true
     }
@@ -1215,7 +1224,7 @@ class CanvasView(context: Context, private val model: EditorModel, private val h
                 s.clearOverlay()
                 s.overlayMultiply = tool == EditorTool.HIGHLIGHTER
                 // Multiply (highlighter) needs the page under it: that stays on the in-view overlay.
-                gpuLive = settings.gpuRendering && liveLayer?.ready == true && !builder.blendsMultiply
+                gpuLive = settings.gpuRendering && liveLayerAllowed && liveLayer?.ready == true && !builder.blendsMultiply
                 val first = sample(e, i, frame)
                 strokePoints.clear()
                 strokePoints += first.x to first.y
@@ -1771,6 +1780,7 @@ class CanvasView(context: Context, private val model: EditorModel, private val h
 
     /** Re-reads tool and settings state. */
     fun applySettings() {
+        if (disposed) return
         if (tools.tool != EditorTool.LASSO && selection != null) clearSelection()
         if (settings.pageLayout != layoutMode) {
             val index = model.currentPageIndex

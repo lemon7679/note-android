@@ -67,6 +67,7 @@ import com.lemon7679.note.app.LibraryLocation
 import com.lemon7679.note.app.LibraryRef
 import com.lemon7679.note.app.LibrarySource
 import com.lemon7679.note.app.OpenDocument
+import com.lemon7679.note.app.present
 import com.lemon7679.note.app.byteLabel
 import com.lemon7679.note.core.FileNaming
 import com.lemon7679.note.core.LibraryItemKind
@@ -486,7 +487,7 @@ fun RemoteBrowserScreen(app: AppModel, account: NasAccount, onDismiss: () -> Uni
                             if (item.isDirectory) path = item.path
                             else if (kind == LibraryItemKind.PDF) scope.launch {
                                 download(item)?.let { f ->
-                                    app.openDocument = OpenDocument(LibraryRef(LibrarySource(account.id), item.path), f, OpenDocument.Kind.PDF, isRemoteCopy = true)
+                                    app.present(OpenDocument(LibraryRef(LibrarySource(account.id), item.path), f, OpenDocument.Kind.PDF, isRemoteCopy = true))
                                 }
                             }
                         }.heightIn(min = 52.dp).padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {

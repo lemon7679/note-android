@@ -35,6 +35,8 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.ChevronLeft
+import androidx.compose.material.icons.outlined.Close
+import androidx.compose.material.icons.outlined.PictureAsPdf
 import androidx.compose.material.icons.outlined.FileDownload
 import androidx.compose.material.icons.outlined.KeyboardArrowDown
 import androidx.compose.material.icons.outlined.KeyboardArrowUp
@@ -77,7 +79,13 @@ import androidx.compose.ui.unit.sp
 import com.lemon7679.note.app.AppModel
 import com.lemon7679.note.app.LibraryRef
 import com.lemon7679.note.app.LibrarySource
+import com.lemon7679.note.app.DocumentPlacement
 import com.lemon7679.note.app.OpenDocument
+import com.lemon7679.note.app.PaneRole
+import com.lemon7679.note.app.backTargetId
+import com.lemon7679.note.app.closeDocument
+import com.lemon7679.note.app.closeWorkspace
+import com.lemon7679.note.app.openDocumentCount
 import com.lemon7679.note.core.FileNaming
 import com.lemon7679.note.core.RemotePath
 import com.lemon7679.note.render.PdfHandle
@@ -91,15 +99,20 @@ private data class PdfHit(val page: Int, val rect: RectF, val context: String)
 
 /** PDF viewer (design: PDF artboard): continuous pages, thumbnails, search, scrubber, "필기 시작". */
 @Composable
-fun PdfReaderScreen(app: AppModel, doc: OpenDocument) {
+fun PdfReaderScreen(app: AppModel, doc: OpenDocument, role: PaneRole = PaneRole.SINGLE) {
     val c = NoteTheme.colors
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val pdf = remember(doc.file) { PdfHandle.open(doc.file) }
     DisposableEffect(pdf) { onDispose { pdf?.close() } }
-    val close = { app.documentClosed(doc) }
-    BackHandler { close() }
-    val list = rememberLazyListState()
+    // The library button closes everything; the right pane closes only itself.
+    val close = { if (role.closesWorkspace) app.closeWorkspace() else app.closeDocument(doc.id) }
+    BackHandler(app.backTargetId == doc.id) { app.closeDocument(doc.id) }
+    // Moving to another pane or window rebuilds this screen: come back to the same page.
+    val list = rememberLazyListState(initialFirstVisibleItemIndex = app.sessions.pdfPage(doc.id))
+    LaunchedEffect(list) {
+        snapshotFlow { list.firstVisibleItemIndex }.collect { app.sessions.setPdfPage(doc.id, it) }
+    }
     var showThumbs by remember { mutableStateOf(false) }
     var searching by remember { mutableStateOf(false) }
     var query by remember { mutableStateOf("") }
@@ -110,30 +123,47 @@ fun PdfReaderScreen(app: AppModel, doc: OpenDocument) {
     val pageCount = pdf?.pageCount ?: 0
     val current by remember { androidx.compose.runtime.derivedStateOf { list.firstVisibleItemIndex } }
 
+    val title = FileNaming.split(doc.file.name).first
     Column(Modifier.fillMaxSize().background(c.desk).windowInsetsPadding(WindowInsets.safeDrawing)) {
-        Row(Modifier.fillMaxWidth().height(52.dp).background(c.surface).padding(horizontal = 6.dp), verticalAlignment = Alignment.CenterVertically) {
-            Row(Modifier.clickable { close() }.padding(end = 6.dp).height(44.dp), verticalAlignment = Alignment.CenterVertically) {
-                Icon(Icons.Outlined.ChevronLeft, null, tint = c.accent)
-                Text("라이브러리", color = c.accent, fontSize = 15.sp, fontWeight = FontWeight.Medium)
+        if (role == PaneRole.FLOATING) {
+            FloatingHeader(app, doc.id, title, Icons.Outlined.PictureAsPdf) {
+                NoteIconButton(Icons.Outlined.Search, "문서 내 검색", isOn = searching) { searching = !searching }
             }
-            NoteIconButton(Icons.Outlined.ViewSidebar, "페이지 목록", isOn = showThumbs) { showThumbs = !showThumbs }
-            NoteIconButton(Icons.Outlined.Search, "문서 내 검색", isOn = searching) { searching = !searching }
-            Text(FileNaming.split(doc.file.name).first, fontSize = 16.sp, fontWeight = FontWeight.SemiBold, color = c.textPrimary,
-                maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f).padding(horizontal = 8.dp))
-            if (doc.isRemoteCopy) {
-                TextButton({
-                    app.perform(LibrarySource(doc.ref.source.accountId)) { it.importFile(doc.file, "/") }
-                }) {
-                    Icon(Icons.Outlined.FileDownload, null, Modifier.size(18.dp))
-                    Text(" 노트 폴더로 가져오기")
+        } else BoxWithConstraints(Modifier.fillMaxWidth()) {
+            val compact = maxWidth < 600.dp
+            Row(Modifier.fillMaxWidth().height(52.dp).background(c.surface).padding(horizontal = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+                if (role.closesWorkspace) {
+                    Row(Modifier.clickable { close() }.padding(end = 6.dp).height(44.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Outlined.ChevronLeft, if (app.openDocumentCount > 1) "모두 닫고 라이브러리로" else "라이브러리", tint = c.accent)
+                        if (!compact) Text("라이브러리", color = c.accent, fontSize = 15.sp, fontWeight = FontWeight.Medium)
+                    }
+                } else {
+                    NoteIconButton(Icons.Outlined.Close, "이 창 닫기") { close() }
                 }
-            } else {
-                PrimaryButton("필기 시작", icon = NoteIcons.pen) {
-                    app.documentClosed(doc)
-                    app.annotate(doc.ref)
+                NoteIconButton(Icons.Outlined.ViewSidebar, "페이지 목록", isOn = showThumbs) { showThumbs = !showThumbs }
+                WindowMenuButton(app, doc.id)
+                NoteIconButton(Icons.Outlined.Search, "문서 내 검색", isOn = searching) { searching = !searching }
+                Text(title, fontSize = 16.sp, fontWeight = FontWeight.SemiBold, color = c.textPrimary,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f).padding(horizontal = 8.dp))
+                if (doc.isRemoteCopy) {
+                    if (compact) {
+                        NoteIconButton(Icons.Outlined.FileDownload, "노트 폴더로 가져오기") {
+                            app.perform(LibrarySource(doc.ref.source.accountId)) { it.importFile(doc.file, "/") }
+                        }
+                    } else TextButton({
+                        app.perform(LibrarySource(doc.ref.source.accountId)) { it.importFile(doc.file, "/") }
+                    }) {
+                        Icon(Icons.Outlined.FileDownload, null, Modifier.size(18.dp))
+                        Text(" 노트 폴더로 가져오기")
+                    }
+                } else if (compact) {
+                    NoteIconButton(NoteIcons.pen, "필기 시작", tint = c.accent) { app.annotate(doc.ref, DocumentPlacement.Replacing(doc.id)) }
+                } else {
+                    // The notebook takes this PDF's place (pane or window).
+                    PrimaryButton("필기 시작", icon = NoteIcons.pen) { app.annotate(doc.ref, DocumentPlacement.Replacing(doc.id)) }
                 }
+                if (!compact) NoteIconButton(Icons.Outlined.Share, "공유") { shareFile(context, doc.file, "application/pdf") }
             }
-            NoteIconButton(Icons.Outlined.Share, "공유") { shareFile(context, doc.file, "application/pdf") }
         }
         Hairline()
         if (searching) {
@@ -200,7 +230,7 @@ fun PdfReaderScreen(app: AppModel, doc: OpenDocument) {
                     Text("PDF를 열 수 없습니다.", color = c.textSecondary, modifier = Modifier.align(Alignment.Center))
                 } else {
                     val density = LocalDensity.current
-                    val pageWidthDp = minOf(maxWidth - 32.dp, 900.dp)
+                    val pageWidthDp = minOf(maxWidth - 32.dp, 900.dp).coerceAtLeast(120.dp)
                     val pagePx = with(density) { pageWidthDp.toPx() }.roundToInt()
                     LazyColumn(Modifier.fillMaxSize().graphicsLayer { scaleX = zoom; scaleY = zoom; translationX = pan.x },
                         state = list, contentPadding = PaddingValues(vertical = 20.dp), horizontalAlignment = Alignment.CenterHorizontally,

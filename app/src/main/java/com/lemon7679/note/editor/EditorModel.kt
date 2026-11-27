@@ -175,6 +175,8 @@ class EditorModel(val app: AppModel, val ref: LibraryRef, file: File) {
 
     val pdf: PdfHandle? = document.pdf?.let { PdfHandle.open(pkg.assetFile(it.file)) }
     var canvas: CanvasControlling? = null
+    /** The id of this notebook in the workspace ([OpenDocument.id]). */
+    val documentId: String get() = ref.id
 
     private val pages = HashMap<String, InkPage>()
     private val dirtyInk = HashSet<String>()

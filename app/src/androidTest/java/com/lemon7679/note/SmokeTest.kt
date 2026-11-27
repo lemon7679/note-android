@@ -16,6 +16,9 @@ import androidx.test.uiautomator.By
 import androidx.test.uiautomator.UiDevice
 import androidx.test.uiautomator.Until
 import com.lemon7679.note.app.AccountSyncStatus
+import com.lemon7679.note.app.DocumentPlacement
+import com.lemon7679.note.app.closeWorkspace
+import com.lemon7679.note.app.present
 import com.lemon7679.note.app.LibraryLocation
 import com.lemon7679.note.app.LibraryRef
 import com.lemon7679.note.app.LibrarySource
@@ -303,12 +306,29 @@ class SmokeTest {
         shot("04-library-after")
 
         // PDF viewer.
-        onMain {
-            val f = app.library(LibrarySource.LOCAL).file("/운영체제_09강.pdf")
-            app.openDocument = OpenDocument(LibraryRef(LibrarySource.LOCAL, "/운영체제_09강.pdf"), f, OpenDocument.Kind.PDF)
-        }
+        val pdfDoc = OpenDocument(LibraryRef(LibrarySource.LOCAL, "/운영체제_09강.pdf"),
+            app.library(LibrarySource.LOCAL).file("/운영체제_09강.pdf"), OpenDocument.Kind.PDF)
+        onMain { app.present(pdfDoc) }
         shot("05-pdf-viewer")
+
+        // Split screen: a notebook beside the PDF, then another notebook in a floating window.
+        onMain { app.openNotebook(LibraryRef(LibrarySource.LOCAL, "/선형대수 필기.inknote"), DocumentPlacement.Beside(pdfDoc.id)) }
+        SystemClock.sleep(1500)
+        onMain { assertEquals(2, app.panes.size) }
+        shot("05b-split-screen")
+        onMain { app.openNotebook(LibraryRef(LibrarySource.LOCAL, "/회의록.inknote"), DocumentPlacement.Floating) }
+        SystemClock.sleep(1500)
+        onMain { assertEquals(1, app.floating.size) }
+        shot("05c-floating-window")
+        // Back closes the window last touched (the floating one), then everything goes.
         device.pressBack()
+        SystemClock.sleep(800)
+        onMain {
+            assertEquals(0, app.floating.size)
+            assertEquals(2, app.panes.size)
+            app.closeWorkspace()
+            assertTrue(app.panes.isEmpty())
+        }
         SystemClock.sleep(800)
 
         // New notebook sheet.

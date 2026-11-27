@@ -84,10 +84,9 @@ import androidx.compose.ui.unit.sp
 import com.lemon7679.note.app.AccountSyncStatus
 import com.lemon7679.note.app.AppModel
 import com.lemon7679.note.app.LibrarySource
-import com.lemon7679.note.app.OpenDocument
+import com.lemon7679.note.app.isWorkspaceOpen
 import com.lemon7679.note.core.NasAccount
 import com.lemon7679.note.core.NasKind
-import com.lemon7679.note.editor.NotebookEditorHost
 import kotlinx.coroutines.launch
 
 sealed class SidebarItem {
@@ -124,7 +123,7 @@ fun RootScreen(app: AppModel) {
         }
     }
 
-    val covered = app.openDocument != null
+    val covered = app.isWorkspaceOpen
     BoxWithConstraints(Modifier.fillMaxSize().background(NoteTheme.colors.background)
         .then(if (covered) Modifier.clearAndSetSemantics {} else Modifier)) {
         val wide = maxWidth >= 840.dp
@@ -159,14 +158,9 @@ fun RootScreen(app: AppModel) {
         }
     }
 
-    val doc = app.openDocument
-    if (doc != null) {
-        FullScreen {
-            when (doc.kind) {
-                OpenDocument.Kind.NOTEBOOK -> NotebookEditorHost(app, doc)
-                OpenDocument.Kind.PDF -> PdfReaderScreen(app, doc)
-            }
-        }
+    // Open documents cover the library: one, two split, and floating windows.
+    if (app.isWorkspaceOpen) {
+        FullScreen { WorkspaceScreen(app) }
     }
     connecting?.let { account -> NasConnectScreen(app, account) { connecting = null } }
     browsing?.let { account -> RemoteBrowserScreen(app, account) { browsing = null } }

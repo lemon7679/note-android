@@ -4,6 +4,7 @@ import android.content.Context
 import android.net.Uri
 import android.provider.OpenableColumns
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
@@ -52,7 +53,8 @@ enum class SyncBadgeState(val label: String) {
 
 /**
  * App-wide state: library sources, NAS accounts and their sync, favorites,
- * recents and the document on screen. Main-thread only (Compose snapshot state).
+ * recents and the open documents (the workspace: split panes and floating windows, see
+ * Workspace.kt). Main-thread only (Compose snapshot state).
  */
 class AppModel(val context: Context) {
     val paths = AppPaths(context)
@@ -70,7 +72,18 @@ class AppModel(val context: Context) {
         private set
     var recents by mutableStateOf(prefs.load("recents", ListSerializer(RecentEntry.serializer())) ?: emptyList())
         private set
-    var openDocument by mutableStateOf<OpenDocument?>(null)
+    /** Documents side by side: one, or two in split screen (index 0 on the left). Empty: the library shows. */
+    var panes by mutableStateOf<List<OpenDocument>>(emptyList())
+    /** Documents in floating windows over the panes. */
+    var floating by mutableStateOf<List<FloatingDocument>>(emptyList())
+    /** Width of the left pane in split screen (0–1). */
+    var splitFraction by mutableFloatStateOf(0.5f)
+    /** The pane or window last touched (the back button closes it). */
+    var focusedDocumentId by mutableStateOf<String?>(null)
+    /** "문서 열기" sheet for a split pane or floating window. */
+    var documentPicker by mutableStateOf<DocumentPlacement?>(null)
+    val sessions = DocumentSessions()
+    internal var floatingCounter = 0
     var errorMessage by mutableStateOf<String?>(null)
     var toast by mutableStateOf<String?>(null)
 
@@ -87,7 +100,7 @@ class AppModel(val context: Context) {
     private val syncJobs = HashMap<String, Job>()
     private val scheduled = HashMap<String, Job>()
     private var periodic: Job? = null
-    private val openNotebooks = HashMap<LibrarySource, MutableSet<String>>()
+    internal val openNotebooks = HashMap<LibrarySource, MutableSet<String>>()
 
     init {
         for (a in accounts) syncStatus[a.id] = AccountSyncStatus(lastSync = a.lastSync)
@@ -173,7 +186,7 @@ class AppModel(val context: Context) {
 
     // Opening & closing documents
 
-    fun open(item: LibraryEntry, source: LibrarySource) {
+    fun open(item: LibraryEntry, source: LibrarySource, placement: DocumentPlacement = DocumentPlacement.Main) {
         scope.launch {
             val ref = LibraryRef(source, item.path)
             var file = library(source).file(item.path)
@@ -193,11 +206,8 @@ class AppModel(val context: Context) {
                 }
             }
             when (item.kind) {
-                LibraryItemKind.NOTEBOOK -> {
-                    openNotebooks.getOrPut(source) { HashSet() }.add(item.path)
-                    openDocument = OpenDocument(ref, file, OpenDocument.Kind.NOTEBOOK)
-                }
-                LibraryItemKind.PDF -> openDocument = OpenDocument(ref, file, OpenDocument.Kind.PDF)
+                LibraryItemKind.NOTEBOOK -> present(OpenDocument(ref, file, OpenDocument.Kind.NOTEBOOK), placement)
+                LibraryItemKind.PDF -> present(OpenDocument(ref, file, OpenDocument.Kind.PDF), placement)
                 else -> {
                     errorMessage = "이 형식(${RemotePath.pathExtension(item.path).uppercase()})은 열 수 없습니다. 공유 메뉴로 다른 앱에서 열어 주세요."
                     return@launch
@@ -207,12 +217,15 @@ class AppModel(val context: Context) {
         }
     }
 
-    fun openNotebook(ref: LibraryRef) {
-        openNotebooks.getOrPut(ref.source) { HashSet() }.add(ref.path)
-        openDocument = OpenDocument(ref, file(ref), OpenDocument.Kind.NOTEBOOK)
+    fun openNotebook(ref: LibraryRef, placement: DocumentPlacement = DocumentPlacement.Main) {
+        present(OpenDocument(ref, file(ref), OpenDocument.Kind.NOTEBOOK), placement)
         noteRecent(ref)
     }
 
+    /**
+     * Bookkeeping after a document closed (its editor has saved): sync may touch it again.
+     * Use [closeDocument] to close one from the UI.
+     */
     fun documentClosed(doc: OpenDocument, exportPdf: (() -> File?)? = null) {
         openNotebooks[doc.ref.source]?.remove(doc.ref.path)
         val id = doc.ref.source.accountId
@@ -224,7 +237,7 @@ class AppModel(val context: Context) {
                 runCatching { exported.copyTo(lib.file(RemotePath.join(RemotePath.parent(doc.ref.path), name)), true) }
             }
         }
-        if (openDocument?.id == doc.id) openDocument = null
+        removeFromLayout(doc.id)
         refreshLibrary()
         localChange(doc.ref.source)
     }
@@ -303,14 +316,14 @@ class AppModel(val context: Context) {
      * "필기 시작" on a PDF in the library: reuses the notebook linked to it, or
      * creates "<PDF> 필기.inknote" beside it (the original PDF stays untouched on the NAS).
      */
-    fun annotate(pdf: LibraryRef) {
+    fun annotate(pdf: LibraryRef, placement: DocumentPlacement = DocumentPlacement.Main) {
         val lib = library(pdf.source)
         val folder = RemotePath.parent(pdf.path)
         for (item in runCatching { lib.list(folder) }.getOrDefault(emptyList())) {
             if (item.kind != LibraryItemKind.NOTEBOOK) continue
             val doc = runCatching { NotebookPackage(lib.file(item.path)).readDocument() }.getOrNull() ?: continue
             if (doc.pdf?.linkedPath == pdf.path) {
-                openNotebook(LibraryRef(pdf.source, item.path))
+                openNotebook(LibraryRef(pdf.source, item.path), placement)
                 return
             }
         }
@@ -323,7 +336,7 @@ class AppModel(val context: Context) {
         try {
             val title = FileNaming.split(RemotePath.name(pdf.path)).first + " 필기"
             val pkg = NotebookPackage.createAnnotating(pdfFile, title, sizes, lib.file(folder), linkedPath = pdf.path)
-            openNotebook(LibraryRef(pdf.source, RemotePath.join(folder, pkg.dir.name)))
+            openNotebook(LibraryRef(pdf.source, RemotePath.join(folder, pkg.dir.name)), placement)
             refreshLibrary()
             localChange(pdf.source)
         } catch (e: Exception) {
